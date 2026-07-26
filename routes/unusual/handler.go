@@ -1,5 +1,5 @@
-// Package routes 提供可复用的 HTTP 路由。
-package routes
+// Package unusual 提供批量个股异动 SSE 服务。
+package unusual
 
 import (
 	"encoding/json"

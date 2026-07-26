@@ -5,7 +5,16 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/bensema/gotdx/proto"
 )
+
+type rootMonitorClient struct{}
+
+// MACMarketMonitor 为根路由测试提供不联网的空异动客户端。
+func (*rootMonitorClient) MACMarketMonitor(uint8, uint32, uint32) ([]proto.MACMarketMonitorItem, error) {
+	return nil, nil
+}
 
 func TestRootHandlerRoutes(t *testing.T) {
 	web := http.NewServeMux()
@@ -20,7 +29,7 @@ func TestRootHandlerRoutes(t *testing.T) {
 		_, _ = w.Write([]byte("methods"))
 	})
 
-	handler := NewRootHandler(web, &sequenceMonitorClient{})
+	handler := NewRootHandler(web, &rootMonitorClient{})
 
 	request := httptest.NewRequest(http.MethodGet, "/", nil)
 	recorder := httptest.NewRecorder()
@@ -50,7 +59,7 @@ func TestRootHandlerRoutes(t *testing.T) {
 }
 
 func TestRootHandlerHealth(t *testing.T) {
-	handler := NewRootHandler(http.NotFoundHandler(), &sequenceMonitorClient{})
+	handler := NewRootHandler(http.NotFoundHandler(), &rootMonitorClient{})
 	request := httptest.NewRequest(http.MethodGet, HealthPath, nil)
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, request)
@@ -68,7 +77,7 @@ func TestRootHandlerHealth(t *testing.T) {
 }
 
 func TestRootHandlerCORS(t *testing.T) {
-	handler := NewRootHandler(http.NotFoundHandler(), &sequenceMonitorClient{})
+	handler := NewRootHandler(http.NotFoundHandler(), &rootMonitorClient{})
 	for _, test := range []struct {
 		origin string
 		want   string

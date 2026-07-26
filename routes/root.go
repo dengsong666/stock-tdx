@@ -5,6 +5,9 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+
+	"github.com/bensema/gotdx/routes/quotes"
+	"github.com/bensema/gotdx/routes/unusual"
 )
 
 const (
@@ -15,12 +18,13 @@ const (
 )
 
 // NewRootHandler 创建包含业务 API、健康检查和 Web Viewer 的根路由。
-func NewRootHandler(webHandler http.Handler, client MACMarketMonitorClient, options ...StockUnusualSSEOption) http.Handler {
+func NewRootHandler(webHandler http.Handler, client unusual.MACMarketMonitorClient, options ...unusual.StockUnusualSSEOption) http.Handler {
 	if webHandler == nil {
 		webHandler = http.NotFoundHandler()
 	}
 	mux := http.NewServeMux()
-	RegisterStockUnusualSSE(mux, client, options...)
+	unusual.RegisterStockUnusualSSE(mux, client, options...)
+	quotes.Register(mux, quotes.NewService())
 	mux.HandleFunc(HealthPath, handleHealth)
 	mux.HandleFunc(WebPath, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != WebPath {
@@ -38,6 +42,13 @@ func NewRootHandler(webHandler http.Handler, client MACMarketMonitorClient, opti
 		http.Redirect(w, r, WebPath, http.StatusFound)
 	})
 	return sameMainDomainCORS(mux)
+}
+
+// writeRouteJSONError 输出根路由使用的 JSON 错误响应。
+func writeRouteJSONError(w http.ResponseWriter, status int, message string) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": message})
 }
 
 func handleHealth(w http.ResponseWriter, r *http.Request) {

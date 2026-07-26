@@ -21,9 +21,27 @@ type barsCall struct {
 
 type fakeBarsClient struct {
 	items        []proto.MACSymbolBar
+	indexItems   []proto.IndexBar
 	err          error
 	calls        []barsCall
 	disconnected bool
+}
+
+// GetIndexBars 按“最新到最旧”的偏移模型返回离线指数 K 线。
+func (client *fakeBarsClient) GetIndexBars(category uint16, market uint8, code string, start uint16, count uint16) (*proto.GetIndexBarsReply, error) {
+	client.calls = append(client.calls, barsCall{market: market, code: code, period: category, start: uint32(start), count: uint32(count)})
+	if client.err != nil {
+		return nil, client.err
+	}
+	if int(start) >= len(client.indexItems) {
+		return &proto.GetIndexBarsReply{}, nil
+	}
+	end := int(start) + int(count)
+	if end > len(client.indexItems) {
+		end = len(client.indexItems)
+	}
+	items := append([]proto.IndexBar(nil), client.indexItems[int(start):end]...)
+	return &proto.GetIndexBarsReply{Count: uint16(len(items)), List: items}, nil
 }
 
 // MACSymbolBars 按“最新到最旧”的偏移模型返回离线 K 线。
@@ -57,10 +75,9 @@ func TestServiceFetchRangeAndThreeMinuteMapping(t *testing.T) {
 		barAtTime(day.Add(9*time.Hour+57*time.Minute), 9.7),
 		barAtTime(day.Add(9*time.Hour+56*time.Minute), 9.6),
 	}}
-	service := newService([]string{"host-a"}, 3, func(string, int) macBarsClient { return client }, func() time.Time {
-		return day.Add(10*time.Hour + time.Minute)
-	})
+	service := newService([]string{"host-a"}, 3, func(string, int) macBarsClient { return client })
 	query := Query{
+		Type:       assetStock,
 		Code:       "600519",
 		Market:     1,
 		Period:     supportedPeriods["3m"],
@@ -76,9 +93,6 @@ func TestServiceFetchRangeAndThreeMinuteMapping(t *testing.T) {
 	}
 	if len(bars) != 3 || bars[0].Time != "2026-07-24 09:57:00" || bars[2].Time != "2026-07-24 09:59:00" {
 		t.Fatalf("unexpected range: %#v", bars)
-	}
-	if !bars[2].IsComplete {
-		t.Fatalf("historical minute bar must be complete: %#v", bars[2])
 	}
 	if !client.disconnected {
 		t.Fatal("short connection was not disconnected")
@@ -99,8 +113,9 @@ func TestServiceHostFailover(t *testing.T) {
 		client := clients[index]
 		index++
 		return client
-	}, time.Now)
+	})
 	query := Query{
+		Type:   assetStock,
 		Code:   "300750",
 		Market: 0,
 		Period: supportedPeriods["day"],
@@ -124,8 +139,9 @@ func TestServiceRejectsMoreThanTwentyThousandBars(t *testing.T) {
 		items[index] = barAtTime(latest.Add(-time.Duration(index)*time.Minute), float64(index+1))
 	}
 	client := &fakeBarsClient{items: items}
-	service := newService([]string{"host"}, 3, func(string, int) macBarsClient { return client }, time.Now)
+	service := newService([]string{"host"}, 3, func(string, int) macBarsClient { return client })
 	query := Query{
+		Type:   assetStock,
 		Code:   "000001",
 		Market: 0,
 		Period: supportedPeriods["1m"],
@@ -159,23 +175,33 @@ func TestMarketForCodeOnlyAcceptsAShares(t *testing.T) {
 	}
 }
 
-func TestIsBarComplete(t *testing.T) {
-	now := time.Date(2026, 7, 24, 14, 30, 0, 0, shanghaiLocation)
-	if !isBarComplete(supportedPeriods["1m"], now.Add(-time.Minute), now) {
-		t.Fatal("past minute must be complete")
+func TestServiceFetchIndexAndAggregateThreeMinutes(t *testing.T) {
+	day := time.Date(2026, 7, 24, 0, 0, 0, 0, shanghaiLocation)
+	client := &fakeBarsClient{indexItems: []proto.IndexBar{
+		indexBarAtTime(day.Add(9*time.Hour+36*time.Minute), 10.6),
+		indexBarAtTime(day.Add(9*time.Hour+35*time.Minute), 10.5),
+		indexBarAtTime(day.Add(9*time.Hour+34*time.Minute), 10.4),
+		indexBarAtTime(day.Add(9*time.Hour+33*time.Minute), 10.3),
+		indexBarAtTime(day.Add(9*time.Hour+32*time.Minute), 10.2),
+		indexBarAtTime(day.Add(9*time.Hour+31*time.Minute), 10.1),
+	}}
+	service := newService([]string{"host"}, 3, func(string, int) macBarsClient { return client })
+	query := Query{
+		Type: assetIndex, Code: "000001", Market: 1,
+		Period: supportedPeriods["3m"], Start: day.Add(9*time.Hour + 31*time.Minute), End: day.Add(9*time.Hour + 36*time.Minute),
 	}
-	if isBarComplete(supportedPeriods["1m"], now.Add(time.Minute), now) {
-		t.Fatal("future minute must be incomplete")
+
+	bars, err := service.Fetch(query)
+	if err != nil {
+		t.Fatalf("fetch index: %v", err)
 	}
-	if isBarComplete(supportedPeriods["day"], now, now) {
-		t.Fatal("current day before close must be incomplete")
+	if len(bars) != 2 || bars[0].Time != "2026-07-24 09:33:00" || bars[1].Time != "2026-07-24 09:36:00" {
+		t.Fatalf("unexpected aggregated bars: %#v", bars)
 	}
-	if !isBarComplete(supportedPeriods["day"], now.AddDate(0, 0, -1), now) {
-		t.Fatal("previous day must be complete")
-	}
-	sunday := time.Date(2026, 7, 26, 10, 0, 0, 0, shanghaiLocation)
-	if !isBarComplete(supportedPeriods["week"], now, sunday) {
-		t.Fatal("current ISO week must be complete after Friday close")
+	for _, call := range client.calls {
+		if call.period != types.KLINE_TYPE_1MIN || call.market != 1 || call.code != "000001" {
+			t.Fatalf("unexpected index mapping: %#v", call)
+		}
 	}
 }
 
@@ -191,5 +217,14 @@ func barAtTime(dateTime time.Time, closePrice float64) proto.MACSymbolBar {
 		Amount:   1000,
 		Turnover: 0.1,
 		PreClose: closePrice - 0.05,
+	}
+}
+
+// indexBarAtTime 创建服务测试使用的最小指数 K 线。
+func indexBarAtTime(dateTime time.Time, closePrice float64) proto.IndexBar {
+	return proto.IndexBar{
+		DateTime: dateTime,
+		Open:     closePrice - 0.1, High: closePrice + 0.2, Low: closePrice - 0.2, Close: closePrice,
+		Vol: 100, Amount: 1000, PreClose: closePrice - 0.05,
 	}
 }

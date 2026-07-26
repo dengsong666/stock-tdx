@@ -22,20 +22,13 @@ type Fetcher interface {
 }
 
 type klineRequest struct {
+	Type   string `json:"type"`
+	Market string `json:"market"`
 	Code   string `json:"code"`
 	Period string `json:"period"`
 	Start  string `json:"start"`
 	End    string `json:"end"`
 	Adjust string `json:"adjust"`
-}
-
-type klineData struct {
-	Code   string `json:"code"`
-	Period string `json:"period"`
-	Start  string `json:"start"`
-	End    string `json:"end"`
-	Adjust string `json:"adjust"`
-	KLines []Bar  `json:"klines"`
 }
 
 type apiResponse struct {
@@ -99,18 +92,11 @@ func (route *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, apiResponse{
 		Code: 0,
 		Msg:  "success",
-		Data: klineData{
-			Code:   query.Code,
-			Period: query.Period.Name,
-			Start:  query.Start.Format(dateTimeLayout),
-			End:    query.End.Format(dateTimeLayout),
-			Adjust: query.AdjustName,
-			KLines: bars,
-		},
+		Data: bars,
 	})
 }
 
-// decodeQuery 解码并规范化股票代码、周期、时间区间和复权方式。
+// decodeQuery 解码并规范化证券类型、市场、代码、周期、时间区间和复权方式。
 func (route *handler) decodeQuery(w http.ResponseWriter, r *http.Request) (Query, error) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
 	decoder := json.NewDecoder(r.Body)
@@ -123,10 +109,28 @@ func (route *handler) decodeQuery(w http.ResponseWriter, r *http.Request) (Query
 		return Query{}, err
 	}
 
-	code := strings.TrimSpace(request.Code)
-	market, err := marketForCode(code)
+	asset, err := parseAssetType(request.Type)
 	if err != nil {
 		return Query{}, err
+	}
+	code := strings.TrimSpace(request.Code)
+	var market uint8
+	if asset == assetIndex {
+		if err := validateSixDigitCode(code); err != nil {
+			return Query{}, err
+		}
+		market, err = parseIndexMarket(request.Market)
+		if err != nil {
+			return Query{}, err
+		}
+	} else {
+		if strings.TrimSpace(request.Market) != "" {
+			return Query{}, fmt.Errorf("type=stock 时不需要 market")
+		}
+		market, err = marketForCode(code)
+		if err != nil {
+			return Query{}, err
+		}
 	}
 	period, err := parsePeriod(request.Period)
 	if err != nil {
@@ -150,11 +154,20 @@ func (route *handler) decodeQuery(w http.ResponseWriter, r *http.Request) (Query
 	if start.After(end) {
 		return Query{}, fmt.Errorf("start 不能晚于 end")
 	}
-	adjustName, adjust, err := parseAdjust(request.Adjust)
-	if err != nil {
-		return Query{}, err
+	adjustName := "none"
+	adjust := uint16(0)
+	if asset == assetIndex {
+		if value := strings.ToLower(strings.TrimSpace(request.Adjust)); value != "" && value != "none" {
+			return Query{}, fmt.Errorf("指数 K 线 adjust 仅支持 none")
+		}
+	} else {
+		adjustName, adjust, err = parseAdjust(request.Adjust)
+		if err != nil {
+			return Query{}, err
+		}
 	}
 	return Query{
+		Type:       asset,
 		Code:       code,
 		Market:     market,
 		Period:     period,

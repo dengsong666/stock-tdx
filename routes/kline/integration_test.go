@@ -14,6 +14,7 @@ func TestKLineServiceIntegration(t *testing.T) {
 	}
 	now := time.Now().In(shanghaiLocation)
 	query := Query{
+		Type:       assetStock,
 		Code:       "600519",
 		Market:     1,
 		Period:     supportedPeriods["3m"],
@@ -37,6 +38,25 @@ func TestKLineServiceIntegration(t *testing.T) {
 	}
 	if !looksLikeThreeMinuteBars(bars) {
 		t.Fatalf("TDX host did not honor 1m x 3 period, sample=%#v", bars[:min(len(bars), 5)])
+	}
+}
+
+func TestKLineIndexServiceIntegration(t *testing.T) {
+	if os.Getenv("GOTDX_INTEGRATION") != "1" {
+		t.Skip("set GOTDX_INTEGRATION=1 to run live TDX index K-line integration test")
+	}
+	now := time.Now().In(shanghaiLocation)
+	query := Query{
+		Type: assetIndex, Code: "000001", Market: 1,
+		Period: supportedPeriods["day"], Start: now.AddDate(0, -1, 0), End: now,
+		Adjust: types.AdjustNone, AdjustName: "none",
+	}
+	bars, err := NewService().Fetch(query)
+	if err != nil {
+		t.Fatalf("live index query failed: %v", err)
+	}
+	if len(bars) == 0 {
+		t.Fatal("live index query returned no bars")
 	}
 }
 

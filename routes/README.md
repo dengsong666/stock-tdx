@@ -20,13 +20,14 @@ routes/
 - `/api/stock/quotes`：TDX 批量股票行情
 - `/api/stock/kline`：单股票时间区间 K 线
 
-## 单股票时间区间 K 线
+## 股票与指数时间区间 K 线
 
 ```http
 POST /api/stock/kline
 Content-Type: application/json
 
 {
+  "type": "stock",
   "code": "600519",
   "period": "5m",
   "start": "2026-07-01 09:30:00",
@@ -37,9 +38,9 @@ Content-Type: application/json
 
 `start` 必填；`end` 可选，省略时使用请求时的北京时间。时间支持 `YYYY-MM-DD` 或 `YYYY-MM-DD HH:mm:ss`，起止边界均包含。日期型 `end` 覆盖到当天结束。
 
-周期支持 `1m`、`3m`、`5m`、`15m`、`30m`、`60m`、`day`、`week`、`month`、`year`。其中 `3m` 使用 TDX 的“1 分钟周期 × 3”能力，不提供 `120m`。复权支持 `none`、`qfq`、`hfq`，省略时默认前复权 `qfq`。
+`type` 支持 `stock`、`index`，省略时默认 `stock`。股票只接受沪深北 A 股六位代码，由服务内部推断市场；指数还必须传 `market=sh|sz|bj`，例如 `{"type":"index","market":"sh","code":"000001",...}`。
 
-接口只接受沪深北 A 股六位代码，由服务内部推断市场；不接受 ETF、可转债、B 股、指数、港股或美股代码，响应也不暴露市场字段。
+周期支持 `1m`、`3m`、`5m`、`15m`、`30m`、`60m`、`day`、`week`、`month`、`year`，不提供 `120m`。股票复权支持 `none`、`qfq`、`hfq`，省略时默认 `qfq`；指数固定为 `none`。股票 3 分钟使用 TDX 的“1 分钟周期 × 3”，指数 3 分钟由服务按交易时段聚合指数 1 分钟数据。
 
 成功响应：
 
@@ -47,35 +48,27 @@ Content-Type: application/json
 {
   "code": 0,
   "msg": "success",
-  "data": {
-    "code": "600519",
-    "period": "5m",
-    "start": "2026-07-01 09:30:00",
-    "end": "2026-07-24 15:00:00",
-    "adjust": "qfq",
-    "klines": [
-      {
-        "time": "2026-07-24 14:55:00",
-        "open": 1410,
-        "high": 1418.5,
-        "low": 1408,
-        "close": 1416,
-        "volume": 123456,
-        "amount": 174800000,
-        "turnover": 0.12,
-        "prev_close": 1409,
-        "change": 7,
-        "change_pct": 0.5,
-        "is_complete": true
-      }
-    ]
-  }
+  "data": [
+    {
+      "time": "2026-07-24 14:55:00",
+      "open": 1410,
+      "high": 1418.5,
+      "low": 1408,
+      "close": 1416,
+      "volume": 123456,
+      "amount": 174800000,
+      "turnover": 0.12,
+      "prev_close": 1409,
+      "change": 7,
+      "change_pct": 0.5
+    }
+  ]
 }
 ```
 
-K 线按时间正序返回，数值保留 gotdx 从 TDX 解码出的精度。`is_complete` 表示对应周期是否已经结束；当前仍在形成的最后一根为 `false`。单次最多返回 20,000 根，超过限制返回 HTTP 400，调用方应缩小时间范围。
+`data` 直接返回按时间正序排列的 K 线数组，不重复请求元数据，也不计算 `is_complete`。数值保留 gotdx 从 TDX 解码出的精度。指数没有换手率时 `turnover` 返回 `0`。单次最多返回 20,000 根，超过限制返回 HTTP 400，调用方应缩小时间范围。
 
-服务使用 gotdx 已有 `MACSymbolBars` 公开 API，通过历史偏移搜索和分页实现时间范围查询。每次 HTTP 请求使用独立短连接，单主站超时 3 秒，失败后切换下一主站；不修改 SDK 的客户端或协议实现。
+股票通过 MAC 主站调用 gotdx 已有 `MACSymbolBars`，指数通过传统主行情服务器调用 `GetIndexBars`，再用历史偏移搜索和分页实现时间范围查询。每次 HTTP 请求使用独立短连接，单主站超时 3 秒，失败后切换同类型的下一主站；不修改 SDK 的客户端或协议实现。
 
 ## TDX 批量股票行情
 

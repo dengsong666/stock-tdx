@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/bensema/gotdx/proto"
+	"github.com/bensema/gotdx/routes/kline"
 )
 
 type rootMonitorClient struct{}
@@ -55,6 +56,13 @@ func TestRootHandlerRoutes(t *testing.T) {
 	handler.ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusNotFound {
 		t.Fatalf("legacy path must not be available: %d", recorder.Code)
+	}
+
+	request = httptest.NewRequest(http.MethodGet, kline.Path, nil)
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("kline route must be registered: code=%d body=%s", recorder.Code, recorder.Body.String())
 	}
 }
 

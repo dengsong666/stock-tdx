@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/bensema/gotdx/routes/kline"
 	"github.com/bensema/gotdx/routes/quotes"
 	"github.com/bensema/gotdx/routes/unusual"
 )
@@ -25,6 +26,7 @@ func NewRootHandler(webHandler http.Handler, client unusual.MACMarketMonitorClie
 	mux := http.NewServeMux()
 	unusual.RegisterStockUnusualSSE(mux, client, options...)
 	quotes.Register(mux, quotes.NewService())
+	kline.Register(mux, kline.NewService())
 	mux.HandleFunc(HealthPath, handleHealth)
 	mux.HandleFunc(WebPath, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != WebPath {

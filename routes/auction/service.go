@@ -18,10 +18,11 @@ const (
 	maxKLineOffset    = uint16(4000)
 )
 
-// AuctionAmount 是单个交易日的竞价金额，单位为万元。
+// AuctionAmount 是单个交易日的竞价金额与前一交易日成交额，单位均为万元。
 type AuctionAmount struct {
-	Date      string `json:"date"`
-	AmountWan int64  `json:"amount_wan"`
+	Date       string `json:"date"`
+	AmountBid  int64  `json:"amount_bid"`
+	AmountPrev int64  `json:"amount_prev"`
 }
 
 // FetchResult 同时返回成功结果和完全没有有效竞价数据的股票代码。
@@ -93,6 +94,10 @@ func fetchCode(client auctionClient, market uint8, code string, days int) ([]Auc
 		return nil, err
 	}
 	amounts := make([]AuctionAmount, 0, len(dates))
+	previousAmounts, err := findPreviousAmounts(client, market, code, dates)
+	if err != nil {
+		return nil, err
+	}
 	for _, date := range dates {
 		items, err := client.StockHistoryFullTransaction(date, market, code)
 		if err != nil {
@@ -102,12 +107,68 @@ func fetchCode(client auctionClient, market uint8, code string, days int) ([]Auc
 		if !ok {
 			continue
 		}
+		previousAmount, ok := previousAmounts[date]
+		if !ok {
+			continue
+		}
 		amounts = append(amounts, AuctionAmount{
-			Date:      formatDate(date),
-			AmountWan: int64(math.Round(item.Price * float64(item.Vol) * 100 / 10000)),
+			Date:       formatDate(date),
+			AmountBid:  int64(math.Round(item.Price * float64(item.Vol) * 100 / 10000)),
+			AmountPrev: int64(math.Round(previousAmount / 10000)),
 		})
 	}
 	return amounts, nil
+}
+
+// findPreviousAmounts 查询日线成交额，并为每个目标日期定位前一个交易日。
+func findPreviousAmounts(client auctionClient, market uint8, code string, targets []uint32) (map[uint32]float64, error) {
+	result := make(map[uint32]float64, len(targets))
+	if len(targets) == 0 {
+		return result, nil
+	}
+	allBars := make([]proto.SecurityBar, 0, len(targets)+1)
+	for start := uint16(0); start < maxKLineOffset; start += klinePageSize {
+		reply, err := client.GetKLine(types.KLINE_TYPE_DAILY, market, code, start, klinePageSize, 1, types.AdjustNone)
+		if err != nil {
+			return nil, err
+		}
+		if reply == nil || len(reply.List) == 0 {
+			break
+		}
+		allBars = append(allBars, reply.List...)
+		result = previousAmountsFromBars(allBars, targets)
+		if len(result) == len(targets) || len(reply.List) < int(klinePageSize) {
+			break
+		}
+	}
+	return result, nil
+}
+
+func previousAmountsFromBars(bars []proto.SecurityBar, targets []uint32) map[uint32]float64 {
+	amounts := make(map[uint32]float64, len(bars))
+	for _, bar := range bars {
+		date, err := strconv.ParseUint(bar.DateTime.Format("20060102"), 10, 32)
+		if err != nil {
+			continue
+		}
+		amounts[uint32(date)] = bar.Amount
+	}
+	dates := make([]uint32, 0, len(amounts))
+	for date := range amounts {
+		dates = append(dates, date)
+	}
+	sort.Slice(dates, func(left, right int) bool { return dates[left] < dates[right] })
+
+	result := make(map[uint32]float64, len(targets))
+	for _, target := range targets {
+		for index := len(dates) - 1; index >= 0; index-- {
+			if dates[index] < target {
+				result[target] = amounts[dates[index]]
+				break
+			}
+		}
+	}
+	return result
 }
 
 // findAuctionDates 通过原始 09:31 一分钟 K 线定位最近的有效交易日期。

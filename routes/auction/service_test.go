@@ -20,6 +20,7 @@ type klineCall struct {
 
 type fakeAuctionClient struct {
 	bars         map[string][]proto.SecurityBar
+	dailyBars    map[string][]proto.SecurityBar
 	transactions map[string]map[uint32][]proto.HistoryTransactionData
 	calls        []klineCall
 	disconnected bool
@@ -32,6 +33,9 @@ func (client *fakeAuctionClient) Connect() (*proto.Hello1Reply, error) {
 func (client *fakeAuctionClient) GetKLine(category uint16, market uint8, code string, start uint16, count uint16, times uint16, adjust uint16) (*proto.GetSecurityBarsReply, error) {
 	client.calls = append(client.calls, klineCall{category: category, market: market, code: code, start: start, count: count, times: times, adjust: adjust})
 	items := client.bars[code]
+	if category == types.KLINE_TYPE_DAILY {
+		items = client.dailyBars[code]
+	}
 	if int(start) >= len(items) {
 		return &proto.GetSecurityBarsReply{}, nil
 	}
@@ -69,7 +73,14 @@ func TestServiceFetchRoundsWanAndFindsRecentDates(t *testing.T) {
 				20260825: {{Time: time.Date(2026, 8, 25, 9, 25, 0, 0, location), Price: 8.46, Vol: 104192}},
 			},
 			"000001": {
-				20260826: {{Time: time.Date(2026, 8, 26, 9, 30, 0, 0, location), Price: 10, Vol: 100}},
+				20260826: {{Time: time.Date(2026, 8, 26, 9, 25, 0, 0, location), Price: 10, Vol: 100}},
+			},
+		},
+		dailyBars: map[string][]proto.SecurityBar{
+			"600127": {
+				{DateTime: time.Date(2026, 8, 26, 0, 0, 0, 0, location), Amount: 900000000},
+				{DateTime: time.Date(2026, 8, 25, 0, 0, 0, 0, location), Amount: 800000000},
+				{DateTime: time.Date(2026, 8, 22, 0, 0, 0, 0, location), Amount: 700000000},
 			},
 		},
 	}
@@ -79,7 +90,7 @@ func TestServiceFetchRoundsWanAndFindsRecentDates(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := result.Auctions["600127"]
-	if len(got) != 2 || got[0].Date != "20260826" || got[0].AmountWan != 11193 || got[1].Date != "20260825" || got[1].AmountWan != 8815 {
+	if len(got) != 2 || got[0].Date != "20260826" || got[0].AmountBid != 11193 || got[0].AmountPrev != 80000 || got[1].Date != "20260825" || got[1].AmountBid != 8815 || got[1].AmountPrev != 70000 {
 		t.Fatalf("unexpected amounts: %#v", got)
 	}
 	if len(result.Auctions["000001"]) != 0 || len(result.MissingCodes) != 1 || result.MissingCodes[0] != "000001" {
@@ -89,7 +100,7 @@ func TestServiceFetchRoundsWanAndFindsRecentDates(t *testing.T) {
 		t.Fatal("client must be disconnected")
 	}
 	for _, call := range client.calls {
-		if call.category != types.KLINE_TYPE_1MIN || call.count != klinePageSize || call.times != 1 || call.adjust != types.AdjustNone {
+		if call.count != klinePageSize || call.times != 1 || call.adjust != types.AdjustNone || (call.category != types.KLINE_TYPE_1MIN && call.category != types.KLINE_TYPE_DAILY) {
 			t.Fatalf("unexpected kline call: %#v", call)
 		}
 	}

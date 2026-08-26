@@ -42,9 +42,9 @@ Content-Type: application/json
   "data": {
     "auctions": {
       "600127": [
-        {"date": "20260826", "amount_wan": 11193},
-        {"date": "20260825", "amount_wan": 8815},
-        {"date": "20260824", "amount_wan": 8293}
+        {"date": "20260826", "amount_bid": 11193, "amount_prev": 80000},
+        {"date": "20260825", "amount_bid": 8815, "amount_prev": 70000},
+        {"date": "20260824", "amount_bid": 8293, "amount_prev": 65000}
       ]
     },
     "missing_codes": []
@@ -52,7 +52,7 @@ Content-Type: application/json
 }
 ```
 
-返回结果已经按 `code` 分组在 `data.auctions` 下，`date` 使用 `YYYYMMDD` 格式，`amount_wan` 的单位是万元，并按四舍五入返回整数。服务按 20 根一页查询原始一分钟 K 线，用每天的 `09:31` 记录定位交易日期，再读取当天历史逐笔成交；只有找到 `09:25` 集合竞价成交时才按 `成交价 × 成交量（手）× 100 ÷ 10000` 计算金额。完全没有有效竞价数据的代码返回空数组，并列入 `missing_codes`。
+返回结果已经按 `code` 分组在 `data.auctions` 下，`date` 使用 `YYYYMMDD` 格式，`amount_bid` 和 `amount_prev` 的单位都是万元，并按四舍五入返回整数。服务按 20 根一页查询原始一分钟 K 线，用每天的 `09:31` 记录定位交易日期，再读取当天历史逐笔成交；只有找到 `09:25` 集合竞价成交时才按 `成交价 × 成交量（手）× 100 ÷ 10000` 计算 `amount_bid`，并从日线中查找该日期前一个交易日的全天成交额计算 `amount_prev`。找不到前一个交易日成交额时，整条记录不返回；完全没有有效记录的代码返回空数组并列入 `missing_codes`。
 
 每次 HTTP 请求使用一个独立的传统主行情短连接，多个股票顺序查询，完成后断开；使用 gotdx 已有公开 API，不修改客户端或协议实现。
 

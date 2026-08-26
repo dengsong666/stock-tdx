@@ -26,8 +26,8 @@ func (fetcher *fakeFetcher) Fetch(codes []string, days int) (FetchResult, error)
 func TestHandlerSuccess(t *testing.T) {
 	fetcher := &fakeFetcher{result: FetchResult{
 		Auctions: map[string][]AuctionAmount{
-			"600127": {{Date: "20260826", AmountWan: 11193}},
-			"000001": {{Date: "20260826", AmountWan: 404}},
+			"600127": {{Date: "20260826", AmountBid: 11193, AmountPrev: 80000}},
+			"000001": {{Date: "20260826", AmountBid: 404, AmountPrev: 10000}},
 		},
 		MissingCodes: []string{"000001"},
 	}}
@@ -49,7 +49,7 @@ func TestHandlerSuccess(t *testing.T) {
 	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
 		t.Fatal(err)
 	}
-	if payload.Code != 0 || payload.Msg != "success" || payload.Data.Auctions["600127"][0].AmountWan != 11193 {
+	if payload.Code != 0 || payload.Msg != "success" || payload.Data.Auctions["600127"][0].AmountBid != 11193 || payload.Data.Auctions["600127"][0].AmountPrev != 80000 {
 		t.Fatalf("unexpected payload: %#v", payload)
 	}
 }

@@ -287,14 +287,22 @@ func decodeDateNum(category uint16, num uint32, index bool) (time.Time, bool) {
 		return DecodeSecond(num), true
 	}
 	if index {
+		// if year == 2870 {
+		// fmt.Println("----", num)
+		// }
+
+		// fmt.Println(year, month, day)
 
 		if year < 1992 || year > time.Now().Year()+1 {
+			// fmt.Println(1)
 			return time.Time{}, false
 		}
 		if month < 1 || month > 12 || day < 1 || day > 31 {
+			// fmt.Println(2)
 			return time.Time{}, false
 		}
 		if hour < 0 || hour > 23 || minute < 0 || minute > 59 {
+			// fmt.Println(3)
 			return time.Time{}, false
 		}
 	}
@@ -474,11 +482,18 @@ func getvolume(ivol int) (volume float64) {
 	return
 }
 
+// baseUnit 按 ETF 代码前缀返回分时协议的原始价格缩放单位。
 func baseUnit(code string) float64 {
 	switch code[:2] {
-	case "60", "30", "68", "00":
+	case "60", "30", "68", "00", "39":
 		return 100.0
-	default:
+	case "51", "56", "58":
+		// 上交所 ETF 使用三位小数。
 		return 1000.0
+	case "15":
+		// 深交所 ETF 使用三位小数。
+		return 1000.0
+	default:
+		return 100.0
 	}
 }

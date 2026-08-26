@@ -75,6 +75,25 @@ func readReqHeader(t *testing.T, raw []byte) ReqHeader {
 	return header
 }
 
+// TestBaseUnit 验证 ETF 使用千分位，其他证券保持默认百分位。
+func TestBaseUnit(t *testing.T) {
+	tests := map[string]float64{
+		"510300": 1000,
+		"560000": 1000,
+		"580000": 1000,
+		"159307": 1000,
+		"150001": 1000,
+		"600000": 100,
+		"000001": 100,
+		"430047": 100,
+	}
+	for code, want := range tests {
+		if got := baseUnit(code); got != want {
+			t.Errorf("base unit for %s: got %v, want %v", code, got, want)
+		}
+	}
+}
+
 func TestGetSecurityCountBuildRequestUsesTodayDate(t *testing.T) {
 	msg := NewGetSecurityCount(&GetSecurityCountRequest{Market: 1})
 
@@ -274,6 +293,77 @@ func TestGetHistoryMinuteTimeDataBuildRequestAndParseResponse(t *testing.T) {
 	}
 	if math.Abs(reply.List[0].Price-10.0) > 0.001 || math.Abs(reply.List[0].Avg-10.0) > 0.001 {
 		t.Fatalf("unexpected point: %+v", reply.List[0])
+	}
+}
+
+// 验证空或超短报文返回 error 而非 panic（修复前 data[:2] 会越界）。
+func TestGetHistoryMinuteTimeDataParseResponseShortData(t *testing.T) {
+	msg := NewGetHistoryMinuteTimeData(&GetHistoryMinuteTimeDataRequest{
+		Date:   20260811,
+		Market: 0,
+		Code:   [6]byte{'0', '0', '0', '7', '7', '9'},
+	})
+
+	// 空报文：修复前触发 slice bounds out of range panic。
+	if err := msg.ParseResponse(&RespHeader{}, []byte{}); err == nil {
+		t.Fatal("expected error for empty payload")
+	}
+	// 少于 10 字节的头部报文同样应返回 error。
+	if err := msg.ParseResponse(&RespHeader{}, make([]byte, 4)); err == nil {
+		t.Fatal("expected error for short payload")
+	}
+}
+
+// 验证 Count 声称条数超过实际报文时返回 error 而非 panic。
+func TestGetHistoryMinuteTimeDataParseResponseTruncatedData(t *testing.T) {
+	msg := NewGetHistoryMinuteTimeData(&GetHistoryMinuteTimeDataRequest{
+		Date:   20260811,
+		Market: 0,
+		Code:   [6]byte{'0', '0', '0', '7', '7', '9'},
+	})
+
+	buf := new(bytes.Buffer)
+	if err := binary.Write(buf, binary.LittleEndian, uint16(100)); err != nil { // 声称 100 条
+		t.Fatal(err)
+	}
+	if err := binary.Write(buf, binary.LittleEndian, uint32(0)); err != nil {
+		t.Fatal(err)
+	}
+	if err := binary.Write(buf, binary.LittleEndian, uint32(0)); err != nil {
+		t.Fatal(err)
+	}
+	// 正文只有 2 字节，远不足以承载 100 条记录。
+	buf.Write(encodePrice(10))
+
+	if err := msg.ParseResponse(&RespHeader{}, buf.Bytes()); err == nil {
+		t.Fatal("expected truncated payload error")
+	}
+}
+
+// 验证变长价格字段在续字节处截断时返回 error 而非 panic。
+// 修复前 readPriceField 仅检查起始位置，getprice 会在读取续字节时越界。
+func TestGetHistoryMinuteTimeDataParseResponseTruncatedVarint(t *testing.T) {
+	msg := NewGetHistoryMinuteTimeData(&GetHistoryMinuteTimeDataRequest{
+		Date:   20260811,
+		Market: 0,
+		Code:   [6]byte{'0', '0', '0', '7', '7', '9'},
+	})
+
+	buf := new(bytes.Buffer)
+	if err := binary.Write(buf, binary.LittleEndian, uint16(1)); err != nil {
+		t.Fatal(err)
+	}
+	if err := binary.Write(buf, binary.LittleEndian, uint32(0)); err != nil {
+		t.Fatal(err)
+	}
+	if err := binary.Write(buf, binary.LittleEndian, uint32(0)); err != nil {
+		t.Fatal(err)
+	}
+	// 变长字段以续位 0x80 开头但无后续字节，直接越界。
+	buf.Write([]byte{0x80})
+
+	if err := msg.ParseResponse(&RespHeader{}, buf.Bytes()); err == nil {
+		t.Fatal("expected error for truncated varint field")
 	}
 }
 
@@ -1452,5 +1542,25 @@ func TestDownloadFileBuildRequestAndParseResponse(t *testing.T) {
 	}
 	if msg.Response().Size != 4 || string(msg.Response().Data) != "DATA" {
 		t.Fatalf("unexpected download reply: %+v", msg.Response())
+	}
+}
+
+func TestBaseUnitUsesHundredForShenZhenIndexPrefix(t *testing.T) {
+	cases := []struct {
+		code string
+		want float64
+	}{
+		{code: "000001", want: 100},
+		{code: "600000", want: 100},
+		{code: "300750", want: 100},
+		{code: "688001", want: 100},
+		{code: "399001", want: 100},
+		{code: "399006", want: 100},
+		{code: "510300", want: 1000},
+	}
+	for _, tc := range cases {
+		if got := baseUnit(tc.code); got != tc.want {
+			t.Fatalf("baseUnit(%q) = %v, want %v", tc.code, got, tc.want)
+		}
 	}
 }

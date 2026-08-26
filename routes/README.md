@@ -7,7 +7,8 @@ routes/
 ├── root.go
 ├── unusual/  # 批量个股异动 SSE
 ├── quotes/   # TDX 批量股票行情
-└── kline/    # 单股票时间区间 K 线
+├── kline/    # 单股票时间区间 K 线
+└── auction/  # 批量股票多日竞价金额
 ```
 
 当前地址：
@@ -19,6 +20,41 @@ routes/
 - `/api/stock/unusual/sse`：批量个股异动 SSE
 - `/api/stock/quotes`：TDX 批量股票行情
 - `/api/stock/kline`：单股票时间区间 K 线
+- `/api/stock/auction-amounts`：批量股票多日竞价金额
+
+## 批量股票多日竞价金额
+
+```http
+POST /api/stock/auction-amounts
+Content-Type: application/json
+
+{"codes":["600127","000001"],"days":3}
+```
+
+`days` 表示最近多少个有集合竞价成交的交易日，范围为 1 到 10；单次最多查询 20 只沪深北 A 股，重复代码按首次出现顺序去重。
+
+成功响应：
+
+```json
+{
+  "code": 0,
+  "msg": "success",
+  "data": {
+    "auctions": {
+      "600127": [
+        {"date": "20260826", "amount_wan": 11193},
+        {"date": "20260825", "amount_wan": 8815},
+        {"date": "20260824", "amount_wan": 8293}
+      ]
+    },
+    "missing_codes": []
+  }
+}
+```
+
+返回结果已经按 `code` 分组在 `data.auctions` 下，`date` 使用 `YYYYMMDD` 格式，`amount_wan` 的单位是万元，并按四舍五入返回整数。服务按 20 根一页查询原始一分钟 K 线，用每天的 `09:31` 记录定位交易日期，再读取当天历史逐笔成交；只有找到 `09:25` 集合竞价成交时才按 `成交价 × 成交量（手）× 100 ÷ 10000` 计算金额。完全没有有效竞价数据的代码返回空数组，并列入 `missing_codes`。
+
+每次 HTTP 请求使用一个独立的传统主行情短连接，多个股票顺序查询，完成后断开；使用 gotdx 已有公开 API，不修改客户端或协议实现。
 
 ## 股票与指数时间区间 K 线
 

@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/bensema/gotdx/proto"
+	"github.com/bensema/gotdx/routes/auction"
 	"github.com/bensema/gotdx/routes/kline"
 )
 
@@ -63,6 +64,13 @@ func TestRootHandlerRoutes(t *testing.T) {
 	handler.ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("kline route must be registered: code=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+
+	request = httptest.NewRequest(http.MethodGet, auction.Path, nil)
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("auction route must be registered: code=%d body=%s", recorder.Code, recorder.Body.String())
 	}
 }
 

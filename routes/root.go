@@ -1,10 +1,15 @@
 package routes
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
+	"time"
 
 	"github.com/bensema/gotdx/routes/auction"
 	"github.com/bensema/gotdx/routes/kline"
@@ -45,7 +50,66 @@ func NewRootHandler(webHandler http.Handler, client unusual.MACMarketMonitorClie
 		}
 		http.Redirect(w, r, WebPath, http.StatusFound)
 	})
-	return sameMainDomainCORS(mux)
+	return sameMainDomainCORS(jwtAuth(mux))
+}
+
+// jwtAuth 保护 TDX 的业务接口，健康检查保持免登录供容器探活。
+func jwtAuth(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if os.Getenv("JWT_SECRET") == "" && os.Getenv("INTERNAL_TASK_TOKEN") == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if r.URL.Path == HealthPath {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if !validJWT(r.Header.Get("Authorization")) && !validInternalToken(r.Header.Get("Authorization")) {
+			writeRouteJSONError(w, http.StatusUnauthorized, "请先登录")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// validInternalToken 允许模型容器使用内部共享令牌访问 TDX。
+func validInternalToken(header string) bool {
+	expected := os.Getenv("INTERNAL_TASK_TOKEN")
+	return expected != "" && hmac.Equal([]byte(strings.TrimPrefix(header, "Bearer ")), []byte(expected)) && strings.HasPrefix(header, "Bearer ")
+}
+
+// validJWT 使用共享密钥校验访问 JWT 的签名和过期时间。
+func validJWT(header string) bool {
+	if len(header) < 7 || header[:7] != "Bearer " {
+		return false
+	}
+	parts := strings.Split(header[7:], ".")
+	if len(parts) != 3 {
+		return false
+	}
+	secret := os.Getenv("JWT_SECRET")
+	if secret == "" {
+		secret = "stock-dev-jwt-secret-change-me"
+	}
+	unsigned := parts[0] + "." + parts[1]
+	expected := hmac.New(sha256.New, []byte(secret))
+	_, _ = expected.Write([]byte(unsigned))
+	actual, err := base64.RawURLEncoding.DecodeString(parts[2])
+	if err != nil || !hmac.Equal(expected.Sum(nil), actual) {
+		return false
+	}
+	body, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return false
+	}
+	var payload struct {
+		Purpose string  `json:"purpose"`
+		Exp     float64 `json:"exp"`
+	}
+	if json.Unmarshal(body, &payload) != nil || payload.Purpose != "access" {
+		return false
+	}
+	return payload.Exp > float64(time.Now().Unix())
 }
 
 // writeRouteJSONError 输出根路由使用的 JSON 错误响应。

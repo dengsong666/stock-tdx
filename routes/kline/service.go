@@ -19,10 +19,13 @@ const (
 	indexPageSize     = uint32(100)
 	maxBarsPerRequest = 20_000
 	maxSearchOffset   = uint32(10_000_000)
+	maxLiveBarLag     = 2 * time.Minute
 )
 
 // ErrTooManyBars 表示查询区间超过单次最多 20,000 根 K 线的限制。
 var ErrTooManyBars = errors.New("单次最多返回 20000 根K线，请缩小时间区间")
+
+var errStaleLiveData = errors.New("实时分钟线已过期")
 
 type macBarsClient interface {
 	MACSymbolBars(market uint8, code string, period uint16, times uint16, start uint32, count uint32, adjust uint16) ([]proto.MACSymbolBar, error)
@@ -39,6 +42,7 @@ type Service struct {
 	timeoutSec     int
 	newStockClient barsClientFactory
 	newIndexClient barsClientFactory
+	now            func() time.Time
 
 	mu             sync.Mutex
 	preferredStock int
@@ -53,6 +57,7 @@ func NewService() *Service {
 		timeoutSec:     defaultTimeoutSec,
 		newStockClient: newMACClient,
 		newIndexClient: newMainClient,
+		now:            time.Now,
 	}
 }
 
@@ -64,6 +69,7 @@ func newService(hosts []string, timeoutSec int, factory barsClientFactory) *Serv
 		timeoutSec:     timeoutSec,
 		newStockClient: factory,
 		newIndexClient: factory,
+		now:            time.Now,
 	}
 }
 
@@ -118,6 +124,11 @@ func (service *Service) Fetch(query Query) ([]Bar, error) {
 		rawBars, err := queryRange(client, requestQuery)
 		_ = client.Disconnect()
 		if err == nil {
+			if freshnessErr := service.validateLiveFreshness(query, rawBars); freshnessErr != nil {
+				lastErr = fmt.Errorf("host=%s: %w", host, freshnessErr)
+				log.Printf("TDX K线主站数据过期 host=%s code=%s period=%s: %v", host, query.Code, query.Period.Name, freshnessErr)
+				continue
+			}
 			if query.Type == assetIndex && query.Period.Name == "3m" {
 				rawBars = aggregateIndexThreeMinuteBars(rawBars)
 			}
@@ -131,6 +142,38 @@ func (service *Service) Fetch(query Query) ([]Bar, error) {
 		log.Printf("TDX K线主站失败 host=%s code=%s period=%s: %v", host, query.Code, query.Period.Name, err)
 	}
 	return nil, lastErr
+}
+
+// validateLiveFreshness 拒绝当天交易时段内明显落后的分钟线，促使调用方切换主站。
+func (service *Service) validateLiveFreshness(query Query, bars []rawBar) error {
+	if query.Period.Kind != periodMinute {
+		return nil
+	}
+	now := service.now().In(shanghaiLocation)
+	end := query.End.In(shanghaiLocation)
+	if !sameDate(now, end) || !isTradingClock(end) || end.Before(now.Add(-10*time.Minute)) || end.After(now.Add(2*time.Minute)) {
+		return nil
+	}
+	if len(bars) == 0 {
+		return errStaleLiveData
+	}
+	latest := bars[0].DateTime
+	for _, bar := range bars[1:] {
+		if bar.DateTime.After(latest) {
+			latest = bar.DateTime
+		}
+	}
+	lag := end.Sub(wallTimeInShanghai(latest))
+	if lag > maxLiveBarLag {
+		return fmt.Errorf("最新K线=%s，查询结束=%s，落后=%s", wallTimeInShanghai(latest).Format(dateTimeLayout), end.Format(dateTimeLayout), lag.Round(time.Second))
+	}
+	return nil
+}
+
+func isTradingClock(value time.Time) bool {
+	totalSeconds := value.Hour()*3600 + value.Minute()*60 + value.Second()
+	return totalSeconds >= 9*3600+30*60 && totalSeconds <= 11*3600+31*60 ||
+		totalSeconds >= 13*3600 && totalSeconds <= 15*3600+1*60
 }
 
 // connectionConfig 为股票选择 MAC 主站，为指数选择传统主行情服务器。

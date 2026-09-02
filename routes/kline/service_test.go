@@ -132,6 +132,41 @@ func TestServiceHostFailover(t *testing.T) {
 	}
 }
 
+func TestServiceRejectsStaleLiveHostAndFailsOver(t *testing.T) {
+	now := time.Date(2026, 7, 24, 13, 36, 30, 0, shanghaiLocation)
+	stale := &fakeBarsClient{items: []proto.MACSymbolBar{
+		barAtTime(now.Add(-6*time.Minute), 10),
+	}}
+	fresh := &fakeBarsClient{items: []proto.MACSymbolBar{
+		barAtTime(now.Add(-90*time.Second), 11),
+	}}
+	clients := []macBarsClient{stale, fresh}
+	index := 0
+	service := newService([]string{"stale-host", "fresh-host"}, 3, func(string, int) macBarsClient {
+		client := clients[index]
+		index++
+		return client
+	})
+	service.now = func() time.Time { return now }
+	query := Query{
+		Type:   assetStock,
+		Code:   "600519",
+		Market: 1,
+		Period: supportedPeriods["1m"],
+		Start:  now.Add(-10 * time.Minute),
+		End:    now,
+		Adjust: types.AdjustNone,
+	}
+
+	bars, err := service.Fetch(query)
+	if err != nil || len(bars) != 1 || bars[0].Close != 11 {
+		t.Fatalf("stale host should fail over, bars=%#v err=%v", bars, err)
+	}
+	if !stale.disconnected || !fresh.disconnected {
+		t.Fatal("all attempted short connections must be disconnected")
+	}
+}
+
 func TestServiceRejectsMoreThanTwentyThousandBars(t *testing.T) {
 	latest := time.Date(2026, 7, 24, 15, 0, 0, 0, shanghaiLocation)
 	items := make([]proto.MACSymbolBar, maxBarsPerRequest+1)

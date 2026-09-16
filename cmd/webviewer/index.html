@@ -889,6 +889,8 @@
   </div>
 
   <script>
+    // 兼容直接访问 /web 和经主站代理访问 /api/proxy/tdx/web 两种入口。
+    const WEB_API_BASE = location.pathname.replace(/\/+$/, '');
     const state = {
       methods: [],
       selected: null,
@@ -901,7 +903,7 @@
 
     async function boot() {
       try {
-        state.methods = await fetchJSON('/web/api/methods');
+        state.methods = await fetchJSON(`${WEB_API_BASE}/api/methods`);
         if (!Array.isArray(state.methods) || state.methods.length === 0) {
           throw new Error('接口注册表为空');
         }
@@ -1179,7 +1181,7 @@
       document.getElementById('runStatus').innerHTML = '<strong>执行中</strong> 正在请求远程主机...';
 
       try {
-        const response = await fetchJSON('/web/api/query', {
+        const response = await fetchJSON(`${WEB_API_BASE}/api/query`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ method: method.key, params }),

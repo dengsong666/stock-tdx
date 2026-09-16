@@ -22,6 +22,8 @@ routes/
 - `/api/stock/kline`：单股票时间区间 K 线
 - `/api/stock/auction-amounts`：批量股票多日竞价金额
 
+以上地址（`/api/health` 除外）都需要带共享 JWT，浏览器侧推荐经主站 `/api/proxy/tdx/**` 访问，详见“CORS 与鉴权”。
+
 ## 批量股票多日竞价金额
 
 ```http
@@ -183,4 +185,20 @@ func main() {
 
 ## CORS 与鉴权
 
-根路由只允许 `dengsong.online` 及其子域的浏览器跨域请求。业务服务不使用 Token 鉴权；部署层应根据实际用途决定是否公开对应域名。
+所有业务 API、SSE 和 Web Viewer 都校验共享 JWT，只有健康检查 `/api/health` 和模型内部任务令牌例外；缺少有效令牌时统一返回 `401` 和 `{"error":"请先登录"}`。鉴权在 `routes/root.go` 的 `jwtAuth` 中统一完成，校验签名、`purpose=access` 和过期时间，密钥取 `JWT_SECRET`。
+
+根路由只允许 `dengsong.online` 及其子域的浏览器跨域请求，且 CORS 允许的请求头只有 `Content-Type`，因此浏览器无法直接跨域携带 `Authorization` 调用 TDX。
+
+### 主站代理
+
+主站 Web 服务提供 `/api/proxy/tdx/**`，用登录用户的访问令牌把请求转发到 `TDX_API_BASE_URL`（容器内默认 `http://tdx:8883`），路径原样透传：
+
+| 主站地址 | 转发到 TDX |
+| --- | --- |
+| `GET /api/proxy/tdx/web` | `GET /web`（Web Viewer 页面） |
+| `POST /api/proxy/tdx/web/api/query` | `POST /web/api/query` |
+| `POST /api/proxy/tdx/api/stock/quotes` | `POST /api/stock/quotes` |
+
+浏览器只访问主站同源地址，认证走主站的 HttpOnly 会话 Cookie，不需要跨域，也不需要把 TDX 域名暴露给浏览器。Web Viewer 页面按当前访问路径推导调试接口地址，直接访问 `/web` 和经主站代理访问都能正常工作。
+
+服务间调用使用 `INTERNAL_TASK_TOKEN`，例如 adata 通过 `http://tdx:8883` 调用行情接口。

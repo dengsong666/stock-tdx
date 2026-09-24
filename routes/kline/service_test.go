@@ -19,11 +19,22 @@ type barsCall struct {
 	adjust uint16
 }
 
+type exBarsCall struct {
+	category uint8
+	code     string
+	period   uint16
+	times    uint16
+	start    uint32
+	count    uint16
+}
+
 type fakeBarsClient struct {
 	items        []proto.MACSymbolBar
 	indexItems   []proto.IndexBar
+	exItems      []proto.ExKLineItem
 	err          error
 	calls        []barsCall
+	exCalls      []exBarsCall
 	disconnected bool
 }
 
@@ -58,6 +69,23 @@ func (client *fakeBarsClient) MACSymbolBars(market uint8, code string, period ui
 		end = uint32(len(client.items))
 	}
 	return append([]proto.MACSymbolBar(nil), client.items[start:end]...), nil
+}
+
+// ExGetKLine 按“最新到最旧”的偏移模型返回离线扩展行情指数 K 线。
+func (client *fakeBarsClient) ExGetKLine(category uint8, code string, period uint16, start uint32, count uint16, times uint16) (*proto.ExGetKLineReply, error) {
+	client.exCalls = append(client.exCalls, exBarsCall{category: category, code: code, period: period, times: times, start: start, count: count})
+	if client.err != nil {
+		return nil, client.err
+	}
+	if int(start) >= len(client.exItems) {
+		return &proto.ExGetKLineReply{}, nil
+	}
+	end := int(start) + int(count)
+	if end > len(client.exItems) {
+		end = len(client.exItems)
+	}
+	items := append([]proto.ExKLineItem(nil), client.exItems[int(start):end]...)
+	return &proto.ExGetKLineReply{Category: category, Period: period, Times: times, Start: start, Count: uint16(len(items)), List: items}, nil
 }
 
 // Disconnect 记录服务是否正确关闭短连接。
@@ -240,6 +268,164 @@ func TestServiceFetchIndexAndAggregateThreeMinutes(t *testing.T) {
 	}
 }
 
+func TestServiceFallsBackToExMarketWhenMainIndexEmpty(t *testing.T) {
+	day := time.Date(2026, 7, 24, 0, 0, 0, 0, shanghaiLocation)
+	main := &fakeBarsClient{}
+	ex := &fakeBarsClient{exItems: []proto.ExKLineItem{
+		exBarAtTime(day.Add(15*time.Hour), 5814.26),
+		exBarAtTime(day.Add(14*time.Hour), 5800),
+	}}
+	service := newProtocolService(main, ex)
+	query := Query{
+		Type: assetIndex, Code: "000985", Market: 1,
+		Period: supportedPeriods["day"], Start: day, End: day.Add(24 * time.Hour),
+	}
+
+	bars, err := service.Fetch(query)
+	if err != nil || len(bars) != 2 {
+		t.Fatalf("ex fallback bars=%#v err=%v", bars, err)
+	}
+	if !main.disconnected || !ex.disconnected {
+		t.Fatal("all attempted short connections must be disconnected")
+	}
+	if len(ex.exCalls) == 0 {
+		t.Fatal("extended market protocol was not used")
+	}
+	for _, call := range ex.exCalls {
+		if call.category != exIndexCategory || call.code != "000985" || call.period != types.KLINE_TYPE_RI_K || call.times != 1 {
+			t.Fatalf("unexpected ex mapping: %#v", call)
+		}
+	}
+}
+
+func TestServiceScalesExMarketVolumeAndAmount(t *testing.T) {
+	day := time.Date(2026, 7, 24, 0, 0, 0, 0, shanghaiLocation)
+	for _, testCase := range []struct {
+		period      string
+		volumeScale float64
+	}{
+		{"day", exDailyVolumeScale},
+		{"week", exDailyVolumeScale},
+		{"3m", exMinuteVolumeScale},
+	} {
+		item := exBarAtTime(day.Add(15*time.Hour), 5814.26)
+		item.Vol = 1234
+		item.Amount = 56.78
+		service := newProtocolService(&fakeBarsClient{}, &fakeBarsClient{exItems: []proto.ExKLineItem{item}})
+		query := Query{
+			Type: assetIndex, Code: "000985", Market: 1,
+			Period: supportedPeriods[testCase.period], Start: day, End: day.Add(24 * time.Hour),
+		}
+
+		bars, err := service.Fetch(query)
+		if err != nil || len(bars) != 1 {
+			t.Fatalf("%s ex bars=%#v err=%v", testCase.period, bars, err)
+		}
+		if bars[0].Volume != 1234*testCase.volumeScale || bars[0].Amount != 56.78*float64(exAmountScale) {
+			t.Fatalf("%s volume/amount were not converted to hand/yuan: %#v", testCase.period, bars[0])
+		}
+	}
+}
+
+func TestServiceKeepsMainIndexWhenAvailable(t *testing.T) {
+	day := time.Date(2026, 7, 24, 0, 0, 0, 0, shanghaiLocation)
+	main := &fakeBarsClient{indexItems: []proto.IndexBar{
+		indexBarAtTime(day.Add(15*time.Hour), 3500.12),
+		indexBarAtTime(day.Add(14*time.Hour), 3490.5),
+	}}
+	ex := &fakeBarsClient{exItems: []proto.ExKLineItem{exBarAtTime(day.Add(15*time.Hour), 5814.26)}}
+	service := newProtocolService(main, ex)
+	query := Query{
+		Type: assetIndex, Code: "000001", Market: 1,
+		Period: supportedPeriods["day"], Start: day, End: day.Add(24 * time.Hour),
+	}
+
+	bars, err := service.Fetch(query)
+	if err != nil || len(bars) != 2 || bars[1].Close != 3500.12 {
+		t.Fatalf("main index result bars=%#v err=%v", bars, err)
+	}
+	if len(ex.exCalls) != 0 || ex.disconnected {
+		t.Fatal("extended market protocol must not be used while main hosts have data")
+	}
+}
+
+func TestServiceReturnsEmptyWhenBothIndexProtocolsEmpty(t *testing.T) {
+	day := time.Date(2026, 7, 24, 0, 0, 0, 0, shanghaiLocation)
+	main := &fakeBarsClient{}
+	ex := &fakeBarsClient{}
+	service := newProtocolService(main, ex)
+	query := Query{
+		Type: assetIndex, Code: "000985", Market: 1,
+		Period: supportedPeriods["day"], Start: day, End: day.Add(24 * time.Hour),
+	}
+
+	bars, err := service.Fetch(query)
+	if err != nil || len(bars) != 0 {
+		t.Fatalf("both protocols empty should not be an error: bars=%#v err=%v", bars, err)
+	}
+	if len(ex.exCalls) == 0 {
+		t.Fatal("extended market protocol should be attempted after the main hosts came back empty")
+	}
+}
+
+func TestServiceThreeMinuteIndexUsesExTimesWithoutAggregation(t *testing.T) {
+	day := time.Date(2026, 7, 24, 0, 0, 0, 0, shanghaiLocation)
+	ex := &fakeBarsClient{exItems: []proto.ExKLineItem{
+		exBarAtTime(day.Add(9*time.Hour+33*time.Minute), 10.3),
+		exBarAtTime(day.Add(9*time.Hour+32*time.Minute), 10.2),
+		exBarAtTime(day.Add(9*time.Hour+31*time.Minute), 10.1),
+	}}
+	service := newProtocolService(&fakeBarsClient{}, ex)
+	query := Query{
+		Type: assetIndex, Code: "000985", Market: 1,
+		Period: supportedPeriods["3m"], Start: day.Add(9*time.Hour + 31*time.Minute), End: day.Add(9*time.Hour + 33*time.Minute),
+	}
+
+	bars, err := service.Fetch(query)
+	if err != nil {
+		t.Fatalf("fetch ex 3m: %v", err)
+	}
+	// 扩展行情自带倍率参数：三根 1 分钟数据应原样返回，本地聚合会并成一根。
+	if len(bars) != 3 || bars[0].Time != "2026-07-24 09:31:00" || bars[2].Time != "2026-07-24 09:33:00" {
+		t.Fatalf("unexpected ex 3m bars: %#v", bars)
+	}
+	for _, call := range ex.exCalls {
+		if call.period != types.KLINE_TYPE_1MIN || call.times != 3 {
+			t.Fatalf("unexpected ex 3m mapping: %#v", call)
+		}
+	}
+}
+
+func TestServicePagesExMarketIndexBars(t *testing.T) {
+	latest := time.Date(2026, 7, 24, 15, 0, 0, 0, shanghaiLocation)
+	items := make([]proto.ExKLineItem, exIndexPageSize+101)
+	for index := range items {
+		items[index] = exBarAtTime(latest.Add(-time.Duration(index)*time.Hour), float64(len(items)-index))
+	}
+	ex := &fakeBarsClient{exItems: items}
+	service := newProtocolService(&fakeBarsClient{}, ex)
+	query := Query{
+		Type: assetIndex, Code: "000985", Market: 1,
+		Period: supportedPeriods["day"],
+		Start:  latest.Add(-time.Duration(len(items)-1) * time.Hour),
+		End:    latest,
+	}
+
+	bars, err := service.Fetch(query)
+	if err != nil || len(bars) != len(items) {
+		t.Fatalf("ex paging bars=%d err=%v", len(bars), err)
+	}
+	paged := false
+	for _, call := range ex.exCalls {
+		if call.count == uint16(exIndexPageSize) && call.start == exIndexPageSize {
+			paged = true
+		}
+	}
+	if !paged {
+		t.Fatalf("expected a second page at offset %d: %#v", exIndexPageSize, ex.exCalls)
+	}
+}
+
 // barAtTime 创建服务测试使用的最小 K 线。
 func barAtTime(dateTime time.Time, closePrice float64) proto.MACSymbolBar {
 	return proto.MACSymbolBar{
@@ -261,5 +447,29 @@ func indexBarAtTime(dateTime time.Time, closePrice float64) proto.IndexBar {
 		DateTime: dateTime,
 		Open:     closePrice - 0.1, High: closePrice + 0.2, Low: closePrice - 0.2, Close: closePrice,
 		Vol: 100, Amount: 1000, PreClose: closePrice - 0.05,
+	}
+}
+
+// exBarAtTime 创建服务测试使用的最小扩展行情指数 K 线，量额沿用协议的万股与百万元。
+func exBarAtTime(dateTime time.Time, closePrice float64) proto.ExKLineItem {
+	return proto.ExKLineItem{
+		DateTime: dateTime,
+		Open:     closePrice - 0.1, High: closePrice + 0.2, Low: closePrice - 0.2, Close: closePrice,
+		Vol: 100, Amount: 1000, PreClose: closePrice - 0.05,
+	}
+}
+
+// newProtocolService 创建把传统主行情与扩展行情分别路由到指定客户端的 K 线服务。
+func newProtocolService(mainClient macBarsClient, exClient macBarsClient) *Service {
+	mainFactory := func(string, int) macBarsClient { return mainClient }
+	return &Service{
+		stockHosts:       []string{"main-host"},
+		indexHosts:       []string{"main-host"},
+		exIndexHosts:     []string{"ex-host"},
+		timeoutSec:       3,
+		newStockClient:   mainFactory,
+		newIndexClient:   mainFactory,
+		newExIndexClient: func(string, int) macBarsClient { return exClient },
+		now:              time.Now,
 	}
 }

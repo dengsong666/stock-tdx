@@ -60,6 +60,27 @@ func TestKLineIndexServiceIntegration(t *testing.T) {
 	}
 }
 
+// TestKLineExMarketIndexServiceIntegration 覆盖只挂在扩展行情的中证系指数兜底链路。
+func TestKLineExMarketIndexServiceIntegration(t *testing.T) {
+	if os.Getenv("GOTDX_INTEGRATION") != "1" {
+		t.Skip("set GOTDX_INTEGRATION=1 to run live TDX ex-market index K-line integration test")
+	}
+	now := time.Now().In(shanghaiLocation)
+	query := Query{
+		Type: assetIndex, Code: "000985", Market: 1,
+		Period: supportedPeriods["day"], Start: now.AddDate(0, -1, 0), End: now,
+		Adjust: types.AdjustNone, AdjustName: "none",
+	}
+	bars, err := NewService().Fetch(query)
+	if err != nil {
+		t.Fatalf("live ex index query failed: %v", err)
+	}
+	// 中证全指在数千点量级，可顺手排除串到同号深市个股（大庆华科 000985）。
+	if len(bars) == 0 || bars[0].Close < 1000 {
+		t.Fatalf("live ex index query returned %d bars: %#v", len(bars), bars)
+	}
+}
+
 // looksLikeThreeMinuteBars 确认同一交易时段的相邻数据没有退化成 1 分钟线。
 func looksLikeThreeMinuteBars(bars []Bar) bool {
 	for index := 1; index < len(bars); index++ {

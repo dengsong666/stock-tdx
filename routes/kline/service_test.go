@@ -32,6 +32,7 @@ type fakeBarsClient struct {
 	items        []proto.MACSymbolBar
 	indexItems   []proto.IndexBar
 	exItems      []proto.ExKLineItem
+	pageCap      uint32
 	err          error
 	calls        []barsCall
 	exCalls      []exBarsCall
@@ -60,6 +61,9 @@ func (client *fakeBarsClient) MACSymbolBars(market uint8, code string, period ui
 	client.calls = append(client.calls, barsCall{market: market, code: code, period: period, times: times, start: start, count: count, adjust: adjust})
 	if client.err != nil {
 		return nil, client.err
+	}
+	if client.pageCap > 0 && count > client.pageCap {
+		count = client.pageCap
 	}
 	if start >= uint32(len(client.items)) {
 		return nil, nil
@@ -129,6 +133,40 @@ func TestServiceFetchRangeAndThreeMinuteMapping(t *testing.T) {
 		if call.market != 1 || call.code != "600519" || call.period != types.KLINE_TYPE_1MIN || call.times != 3 || call.adjust != types.AdjustQFQ {
 			t.Fatalf("unexpected protocol mapping: %#v", call)
 		}
+	}
+}
+
+// 传统主行情服务端单次最多返回 699 根，分页必须按这个上限继续翻页，不能把短页当成历史尽头。
+func TestServicePagesStockBarsWhenServerCapsPage(t *testing.T) {
+	const serverPageCap = 699
+	latest := time.Date(2026, 7, 24, 15, 0, 0, 0, shanghaiLocation)
+	items := make([]proto.MACSymbolBar, serverPageCap*2+101)
+	for index := range items {
+		items[index] = barAtTime(latest.Add(-time.Duration(index)*time.Minute), 10)
+	}
+	client := &fakeBarsClient{items: items, pageCap: serverPageCap}
+	service := newService([]string{"host-a"}, 3, func(string, int) macBarsClient { return client })
+	query := Query{
+		Type:   assetStock,
+		Code:   "600519",
+		Market: 1,
+		Period: supportedPeriods["1m"],
+		Start:  latest.Add(-time.Duration(len(items)-1) * time.Minute),
+		End:    latest,
+	}
+
+	bars, err := service.Fetch(query)
+	if err != nil || len(bars) != len(items) {
+		t.Fatalf("paged bars=%d err=%v", len(bars), err)
+	}
+	paged := false
+	for _, call := range client.calls {
+		if call.count == serverPageCap && call.start == serverPageCap {
+			paged = true
+		}
+	}
+	if !paged {
+		t.Fatalf("expected a second page at offset %d: %#v", serverPageCap, client.calls)
 	}
 }
 

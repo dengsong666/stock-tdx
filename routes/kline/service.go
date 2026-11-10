@@ -15,7 +15,9 @@ import (
 
 const (
 	defaultTimeoutSec = 3
-	rangePageSize     = uint32(800)
+	// 传统主行情服务端单次最多返回 699 根 K 线（1m/5m/day 实测一致），页大小必须取这个上限：
+	// 请求更大的数量也会被截断，而分页逻辑会把短页当成历史尽头，后续区间就永远翻不到。
+	rangePageSize     = uint32(699)
 	mainIndexPageSize = uint32(100)
 	// 扩展行情单次最多返回 699 根，请求更大数量也会被截断。
 	exIndexPageSize   = uint32(699)
@@ -302,6 +304,7 @@ func queryRange(client macBarsClient, query Query, protocol indexProtocol) ([]ra
 		}
 
 		reachedStart := false
+		added := 0
 		for _, item := range page {
 			itemTime := wallTimeInShanghai(item.DateTime)
 			if itemTime.Before(query.Start) {
@@ -317,11 +320,14 @@ func queryRange(client macBarsClient, query Query, protocol indexProtocol) ([]ra
 			}
 			seen[key] = struct{}{}
 			result = append(result, item)
+			added++
 			if len(result) > maxBarsPerRequest {
 				return nil, ErrTooManyBars
 			}
 		}
-		if reachedStart || uint32(len(page)) < pageSize {
+		// 服务端可能截短一页的返回根数，短页不代表已到历史尽头；
+		// 只有越过查询起点、或整页没有新增（服务端忽略偏移）时才算结束。
+		if reachedStart || added == 0 {
 			break
 		}
 		if offset > math.MaxUint32-pageSize {

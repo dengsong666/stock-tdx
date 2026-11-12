@@ -150,3 +150,76 @@ func TestMarketForCode(t *testing.T) {
 		t.Fatal("expected invalid code error")
 	}
 }
+
+// TestServiceFetchIndexes 验证指数市场号、响应键前缀与缺失回填。
+func TestServiceFetchIndexes(t *testing.T) {
+	var gotMarkets []uint8
+	var gotCodes []string
+	reply := &proto.MACSymbolQuotesReply{Stocks: []proto.MACSymbolQuoteItem{
+		{
+			Symbol: "000001",
+			Values: map[string]any{
+				"pre_close":       float64(3680.64),
+				"close":           float64(3655.83),
+				"decimal_point":   uint32(2),
+				"buy_price_limit": float64(0),
+			},
+		},
+		{
+			Symbol: "399107",
+			Values: map[string]any{
+				"pre_close":     float64(2285.03),
+				"close":         float64(2248.08),
+				"decimal_point": uint32(2),
+			},
+		},
+	}}
+	service := newService([]string{"host-1"}, 3, func(_ string, _ int) macSymbolQuoteClient {
+		return &fakeMACClient{
+			reply: reply,
+			onQuery: func(markets []uint8, codes []string, _ [20]byte) {
+				gotMarkets = append([]uint8(nil), markets...)
+				gotCodes = append([]string(nil), codes...)
+			},
+		}
+	})
+
+	result, err := service.FetchIndexes([]IndexRequest{
+		{Market: "sh", Code: "000001"},
+		{Market: "sz", Code: "399107"},
+		{Market: "sh", Code: "000688"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(gotMarkets, []uint8{1, 0, 1}) {
+		t.Fatalf("unexpected markets: %#v", gotMarkets)
+	}
+	if !reflect.DeepEqual(gotCodes, []string{"000001", "399107", "000688"}) {
+		t.Fatalf("unexpected codes: %#v", gotCodes)
+	}
+	quote := result.Quotes["sh000001"]
+	if quote.Price != 3655.83 || quote.Change != -0.67 || quote.Code != "sh000001" {
+		t.Fatalf("unexpected index quote: %#v", quote)
+	}
+	if result.Quotes["sz399107"].Price != 2248.08 {
+		t.Fatalf("unexpected index quote: %#v", result.Quotes["sz399107"])
+	}
+	if !reflect.DeepEqual(result.MissingCodes, []string{"sh000688"}) {
+		t.Fatalf("unexpected missing indexes: %#v", result.MissingCodes)
+	}
+}
+
+// TestServiceFetchIndexesRejectsMarketConflict 验证同号指数跨市场会被拒绝。
+func TestServiceFetchIndexesRejectsMarketConflict(t *testing.T) {
+	service := newService([]string{"host-1"}, 3, func(_ string, _ int) macSymbolQuoteClient {
+		return &fakeMACClient{reply: &proto.MACSymbolQuotesReply{}}
+	})
+	_, err := service.FetchIndexes([]IndexRequest{
+		{Market: "sh", Code: "000001"},
+		{Market: "sz", Code: "000001"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "多个市场") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}

@@ -112,6 +112,66 @@ func (service *Service) Fetch(codes []string) (FetchResult, error) {
 	return FetchResult{Quotes: quotes, MissingCodes: missing}, nil
 }
 
+// indexMarketCode 是指数市场文本到 TDX 市场号的映射。
+var indexMarketCode = map[string]uint8{
+	"sh": 1,
+	"sz": 0,
+	"bj": 2,
+}
+
+// FetchIndexes 查询一批指数行情；响应键由市场与代码拼成（如 sh000001），避免与同号股票撞名。
+func (service *Service) FetchIndexes(indexes []IndexRequest) (FetchResult, error) {
+	markets := make([]uint8, 0, len(indexes))
+	codes := make([]string, 0, len(indexes))
+	keyByCode := make(map[string]string, len(indexes))
+	for _, item := range indexes {
+		market, ok := indexMarketCode[item.Market]
+		if !ok {
+			return FetchResult{}, fmt.Errorf("无效指数市场: %s", item.Market)
+		}
+		if existing, ok := keyByCode[item.Code]; ok && existing != item.Market+item.Code {
+			return FetchResult{}, fmt.Errorf("指数代码 %s 不能同时出现在多个市场", item.Code)
+		}
+		keyByCode[item.Code] = item.Market + item.Code
+		markets = append(markets, market)
+		codes = append(codes, item.Code)
+	}
+	if len(codes) == 0 {
+		return FetchResult{Quotes: map[string]StockQuote{}, MissingCodes: []string{}}, nil
+	}
+
+	reply, err := service.query(markets, codes)
+	if err != nil {
+		return FetchResult{}, err
+	}
+
+	quotes := make(map[string]StockQuote, len(codes))
+	if reply != nil {
+		for _, item := range reply.Stocks {
+			code := strings.TrimSpace(item.Symbol)
+			if code == "" {
+				continue
+			}
+			key, ok := keyByCode[code]
+			if !ok {
+				continue
+			}
+			quote := stockQuoteFromItem(code, item.Values)
+			quote.Code = key
+			quotes[key] = quote
+		}
+	}
+
+	missing := make([]string, 0)
+	for _, item := range indexes {
+		key := item.Market + item.Code
+		if _, ok := quotes[key]; !ok {
+			missing = append(missing, key)
+		}
+	}
+	return FetchResult{Quotes: quotes, MissingCodes: missing}, nil
+}
+
 // query 从上次成功主站开始尝试，每次失败都使用全新的短连接切换下一主站。
 func (service *Service) query(markets []uint8, codes []string) (*proto.MACSymbolQuotesReply, error) {
 	if len(service.hosts) == 0 || service.newClient == nil {

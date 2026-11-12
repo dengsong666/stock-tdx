@@ -114,8 +114,10 @@ Content-Type: application/json
 POST /api/stock/quotes
 Content-Type: application/json
 
-{"codes":["600519","300750","000001"]}
+{"codes":["600519","300750","000001"],"indexes":[{"market":"sh","code":"000001"}]}
 ```
+
+`indexes` 可选，用于指数行情：指数与股票存在同号代码（`000001` 既是平安银行也是上证指数），必须显式带市场（`sh`/`sz`/`bj`），响应键拼成 `sh000001`，与股票代码互不覆盖。`codes` 与 `indexes` 至少填一个，合计最多 1000 个；同一代码不能同时出现在多个市场。
 
 成功响应统一使用 `code`、`msg`、`data`：
 
@@ -137,14 +139,16 @@ Content-Type: application/json
         "updated_at": "2026-07-24 15:30:57"
       }
     },
-    "missing_codes": []
+    "index_quotes": {},
+    "missing_codes": [],
+    "missing_indexes": []
   }
 }
 ```
 
 错误响应的 `data` 为 `null`，`code` 与 HTTP 状态码一致。请求最多包含 1000 个六位证券代码，重复代码按首次出现位置去重。服务自动识别沪市、深市和北交所，但不在响应中暴露市场字段。
 
-每次 HTTP 请求使用独立 TDX MAC 短连接，从最近成功主站开始尝试。单个主站超时 3 秒，失败后切换下一主站；协议成功但未返回的股票通过 `missing_codes` 告知调用方。
+每次 HTTP 请求使用独立 TDX MAC 短连接，从最近成功主站开始尝试。单个主站超时 3 秒，失败后切换下一主站；协议成功但未返回的股票通过 `missing_codes`、指数通过 `missing_indexes` 告知调用方。指数行情同样走 MAC 批量报价，只是入参带市场号；实测五条基准指数一次可取回。
 
 ## 批量个股异动 SSE
 

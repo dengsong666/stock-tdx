@@ -18,15 +18,30 @@ const (
 // Fetcher 描述 HTTP Handler 需要的批量行情能力。
 type Fetcher interface {
 	Fetch(codes []string) (FetchResult, error)
+	FetchIndexes(indexes []IndexRequest) (FetchResult, error)
+}
+
+// IndexRequest 是指数行情的市场与代码；指数与股票存在同号代码，必须显式带市场。
+type IndexRequest struct {
+	Market string
+	Code   string
+}
+
+type indexRequest struct {
+	Market string `json:"market"`
+	Code   string `json:"code"`
 }
 
 type quoteRequest struct {
-	Codes []string `json:"codes"`
+	Codes   []string       `json:"codes"`
+	Indexes []indexRequest `json:"indexes"`
 }
 
 type quoteData struct {
-	Quotes       map[string]StockQuote `json:"quotes"`
-	MissingCodes []string              `json:"missing_codes"`
+	Quotes         map[string]StockQuote `json:"quotes"`
+	IndexQuotes    map[string]StockQuote `json:"index_quotes"`
+	MissingCodes   []string              `json:"missing_codes"`
+	MissingIndexes []string              `json:"missing_indexes"`
 }
 
 type apiResponse struct {
@@ -64,46 +79,73 @@ func (route *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	codes, err := decodeCodes(w, r)
+	codes, indexes, err := decodeRequest(w, r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	result, err := route.fetcher.Fetch(codes)
-	if err != nil {
-		writeError(w, http.StatusBadGateway, fmt.Sprintf("TDX 行情请求失败: %v", err))
-		return
+
+	quotes := map[string]StockQuote{}
+	missingCodes := []string{}
+	if len(codes) > 0 {
+		result, err := route.fetcher.Fetch(codes)
+		if err != nil {
+			writeError(w, http.StatusBadGateway, fmt.Sprintf("TDX 行情请求失败: %v", err))
+			return
+		}
+		if result.Quotes != nil {
+			quotes = result.Quotes
+		}
+		if result.MissingCodes != nil {
+			missingCodes = result.MissingCodes
+		}
 	}
-	if result.Quotes == nil {
-		result.Quotes = map[string]StockQuote{}
+
+	indexQuotes := map[string]StockQuote{}
+	missingIndexes := []string{}
+	if len(indexes) > 0 {
+		result, err := route.fetcher.FetchIndexes(indexes)
+		if err != nil {
+			writeError(w, http.StatusBadGateway, fmt.Sprintf("TDX 指数行情请求失败: %v", err))
+			return
+		}
+		if result.Quotes != nil {
+			indexQuotes = result.Quotes
+		}
+		if result.MissingCodes != nil {
+			missingIndexes = result.MissingCodes
+		}
 	}
-	if result.MissingCodes == nil {
-		result.MissingCodes = []string{}
-	}
+
 	writeJSON(w, http.StatusOK, apiResponse{
 		Code: 0,
 		Msg:  "success",
-		Data: quoteData{Quotes: result.Quotes, MissingCodes: result.MissingCodes},
+		Data: quoteData{
+			Quotes:         quotes,
+			IndexQuotes:    indexQuotes,
+			MissingCodes:   missingCodes,
+			MissingIndexes: missingIndexes,
+		},
 	})
 }
 
-// decodeCodes 解码、校验并按首次出现顺序去重股票代码。
-func decodeCodes(w http.ResponseWriter, r *http.Request) ([]string, error) {
+// decodeRequest 解码、校验并按首次出现顺序去重股票代码与指数。
+func decodeRequest(w http.ResponseWriter, r *http.Request) ([]string, []IndexRequest, error) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
 	var request quoteRequest
 	if err := decoder.Decode(&request); err != nil {
-		return nil, fmt.Errorf("请求体格式错误: %w", err)
+		return nil, nil, fmt.Errorf("请求体格式错误: %w", err)
 	}
 	if err := ensureJSONEOF(decoder); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	if len(request.Codes) == 0 {
-		return nil, fmt.Errorf("codes 不能为空")
+	if len(request.Codes) == 0 && len(request.Indexes) == 0 {
+		return nil, nil, fmt.Errorf("codes 与 indexes 不能同时为空")
 	}
-	if len(request.Codes) > maxQuoteCodes {
-		return nil, fmt.Errorf("单次最多查询 %d 个 code", maxQuoteCodes)
+	if len(request.Codes)+len(request.Indexes) > maxQuoteCodes {
+		return nil, nil, fmt.Errorf("单次最多查询 %d 个代码或指数", maxQuoteCodes)
 	}
 
 	seen := make(map[string]struct{}, len(request.Codes))
@@ -111,7 +153,7 @@ func decodeCodes(w http.ResponseWriter, r *http.Request) ([]string, error) {
 	for _, rawCode := range request.Codes {
 		code := strings.TrimSpace(rawCode)
 		if _, err := marketForCode(code); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if _, ok := seen[code]; ok {
 			continue
@@ -119,7 +161,42 @@ func decodeCodes(w http.ResponseWriter, r *http.Request) ([]string, error) {
 		seen[code] = struct{}{}
 		codes = append(codes, code)
 	}
-	return codes, nil
+
+	seenIndexes := make(map[string]struct{}, len(request.Indexes))
+	indexes := make([]IndexRequest, 0, len(request.Indexes))
+	// 响应按裸代码回填，同号代码跨市场无法区分，只能拒绝。
+	indexMarkets := make(map[string]string, len(request.Indexes))
+	for _, raw := range request.Indexes {
+		market := strings.ToLower(strings.TrimSpace(raw.Market))
+		code := strings.TrimSpace(raw.Code)
+		if err := validateIndexMarket(market); err != nil {
+			return nil, nil, err
+		}
+		if len(code) != 6 || !isASCIIDigits(code) {
+			return nil, nil, fmt.Errorf("无效指数代码: %s", code)
+		}
+		if existing, ok := indexMarkets[code]; ok && existing != market {
+			return nil, nil, fmt.Errorf("指数代码 %s 不能同时出现在多个市场", code)
+		}
+		indexMarkets[code] = market
+		key := market + code
+		if _, ok := seenIndexes[key]; ok {
+			continue
+		}
+		seenIndexes[key] = struct{}{}
+		indexes = append(indexes, IndexRequest{Market: market, Code: code})
+	}
+	return codes, indexes, nil
+}
+
+// validateIndexMarket 校验指数市场只能是沪、深、北三个取值。
+func validateIndexMarket(market string) error {
+	switch market {
+	case "sh", "sz", "bj":
+		return nil
+	default:
+		return fmt.Errorf("无效指数市场: %s（仅支持 sh、sz、bj）", market)
+	}
 }
 
 // ensureJSONEOF 拒绝在合法 JSON 对象后继续追加其他内容。

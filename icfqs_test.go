@@ -11,7 +11,7 @@ import (
 func TestICFQSPostTQLParsesWrappedResponse(t *testing.T) {
 	var gotEntry string
 	var gotBody map[string]any
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotEntry = r.URL.Query().Get("Entry")
 		if r.Header.Get("Content-Type") != "text/plain;charset=UTF-8" {
 			t.Fatalf("unexpected content type: %s", r.Header.Get("Content-Type"))
@@ -19,11 +19,11 @@ func TestICFQSPostTQLParsesWrappedResponse(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
 			t.Fatalf("decode request: %v", err)
 		}
+		// 响应正文前后夹带无关文本，解析器仍应提取出中间的 JSON 结果集。
 		_, _ = w.Write([]byte(`noise {"ResultSets":[{"ColName":["code","name"],"Content":[["000001","PINGAN"]]}]} tail`))
 	}))
-	defer server.Close()
 
-	client := NewICFQS(WithICFQSAddress(server.URL))
+	client := NewICFQS(WithICFQSAddress(server.URL), WithICFQSHTTPClient(server.Client()))
 	raw, err := client.ICFQSTopicListRaw(context.Background(), "X11", "4", 2)
 	if err != nil {
 		t.Fatalf("ICFQSTopicListRaw failed: %v", err)
@@ -52,16 +52,16 @@ func TestICFQSPostTQLParsesWrappedResponse(t *testing.T) {
 func TestICFQSQuotesBatchRawPostsJSONBody(t *testing.T) {
 	var gotEntry string
 	var gotBody map[string]any
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotEntry = r.URL.Query().Get("Entry")
 		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
 			t.Fatalf("decode request: %v", err)
 		}
 		_, _ = w.Write([]byte(`{"ListHead":{"ItemHead":["Code","NOW"]},"ListItem":[{"Item":["000001","12.34"]}]}`))
 	}))
-	defer server.Close()
 
-	client := NewICFQS(WithICFQSAddress(server.URL))
+	client := NewICFQS(WithICFQSAddress(server.URL), WithICFQSHTTPClient(server.Client()))
+	// 校验批量行情请求按 JSON 格式提交市场、代码与请求字段。
 	raw, err := client.ICFQSQuotesBatchRaw(
 		context.Background(),
 		[]ICFQSCode{{Setcode: "0", Code: "000001"}},
@@ -100,6 +100,7 @@ func TestICFQSFormatTablesUsesColDes(t *testing.T) {
 		},
 	}
 
+	// 缺少 `ColName` 时回退到 `ColDes` 元数据中的 `Name`，再按 `Content` 行数据组装表格。
 	tables := ICFQSFormatTables(raw)
 	if len(tables) != 1 || tables[0].Rows[0]["rq"] != "2026-07-04" || tables[0].Rows[0]["code"] != "000001" {
 		t.Fatalf("unexpected tables: %#v", tables)

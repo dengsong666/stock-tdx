@@ -1,28 +1,53 @@
 package gotdx
 
+import (
+	"path/filepath"
+	"runtime"
+	"time"
+)
+
 const (
 	_defaultTCPAddress      = "119.147.212.81:7709"
 	_defaultExTCPAddress    = "112.74.214.43:7727"
 	_defaultMacTCPAddress   = "121.36.248.138:7709"
 	_defaultMacExTCPAddress = "116.205.135.205:7727"
 	_defaultRetryTimes      = 3
-	_defaultTimeoutSec      = 8
+	// 默认连接与读写共用超时：行情接口实测响应在几十至两百毫秒量级（快照/K线/分时/历史
+	// 大负载均 <200ms），2 秒对正常请求保有 10 倍以上余量；缩短默认值让慢服务器快速判负、
+	// 由池化换节点/补建兜底，不再逐个等满 8 秒。拨号另有独立快路径自适应超时（500ms 起），
+	// 正常建池不受此值约束。
+	_defaultTimeoutSec = 2
+	_defaultPoolSize   = 3
+	// 默认熔断配置：连续 5 次请求失败打开熔断，冷却 5 秒后放行单个试探请求验证恢复。
+	_defaultGuardFailThreshold = 5
+	_defaultGuardOpenTimeout   = 5 * time.Second
 )
 
+// Options 保存客户端创建时使用的主站、扩展站、MAC 站地址与地址池、重试次数、超时等全部配置。
+//
+// 该结构体通常不直接构造：`New` 会先应用内置默认配置，再按传入顺序应用各 `Option` 覆盖
+// 对应字段，后传入的选项优先生效。各字段的零值表示"沿用对应默认值"，字段级并发读写
+// 应在构造阶段完成，连接建立后不应再修改。
 type Options struct {
-	TCPAddress          string   // 主行情服务器地址
-	TCPAddressPool      []string // 主行情服务器地址池
-	ExTCPAddress        string   // 扩展行情服务器地址
-	ExTCPAddressPool    []string // 扩展行情服务器地址池
-	MacTCPAddress       string   // MAC 主行情服务器地址
-	MacTCPAddressPool   []string // MAC 主行情服务器地址池
-	MacExTCPAddress     string   // MAC 扩展行情服务器地址
-	MacExTCPAddressPool []string // MAC 扩展行情服务器地址池
-	AutoSelectFastest   bool     // 连接前先对地址池做 TCP 测速并优先尝试低延迟节点
-	MaxRetryTimes       int      // 重试次数
-	TimeoutSec          int      // 连接和读写超时时间，单位秒
+	TCPAddress             string        // 主行情服务器单点地址，格式为 `host:port`；空串时回退到主站地址池
+	TCPAddressPool         []string      // 主行情服务器地址池，连接时按顺序或测速结果依次尝试；空切片使用内置默认池
+	ExTCPAddress           string        // 扩展行情服务器单点地址，格式为 `host:port`；空串时回退到扩展站地址池
+	ExTCPAddressPool       []string      // 扩展行情服务器地址池；空切片使用内置默认池
+	MacTCPAddress          string        // MAC 主行情服务器单点地址，格式为 `host:port`；空串时回退到 MAC 主站地址池
+	MacTCPAddressPool      []string      // MAC 主行情服务器地址池；空切片使用内置默认池
+	MacExTCPAddress        string        // MAC 扩展行情服务器单点地址，格式为 `host:port`；空串时回退到 MAC 扩展站地址池
+	MacExTCPAddressPool    []string      // MAC 扩展行情服务器地址池；空切片使用内置默认池
+	MaxRetryTimes          int           // 单次请求写失败的重试次数；构造阶段由默认值 3 填充，连接流程中按该值重试
+	TimeoutSec             int           // 连接与读写共用的超时时间，单位秒；构造阶段由默认值 2 秒填充，非正数回退默认
+	PoolSize               int           // 连接池大小，即并行可用的 TCP 连接条数；构造阶段由默认值 3 填充，非正数回退默认
+	DisableEmptyNodeSwitch bool          // 关闭空数据换节点：空应答直接返回首次结果，不并行探测其他连接；默认 `false` 保持池化换节点行为
+	GuardEnabled           bool          // 开启 `execute` 入口的熔断与防击穿保护；默认 `true`，四个入口全部数据查询统一受保护
+	GuardFailThreshold     int           // 熔断阈值：同一命令码连续失败多少次打开熔断；构造阶段由默认值 5 填充，非正数回退默认
+	GuardOpenTimeout       time.Duration // 熔断冷却时长：打开后冷却多久放行单个试探请求；零或负数回退默认 5 秒
+	FuturesCalendarPath    string        // 期货交易日历 SQLite 路径；为空时不转换 MAC 期货自然时间
 }
 
+// defaultOptions 构造内置默认配置：各站点使用内置主机列表与兜底地址，并设置默认重试次数、超时与日历路径。
 func defaultOptions() *Options {
 	mainAddress, mainPool := defaultAddressAndPool(MainHostAddresses(), _defaultTCPAddress)
 	exAddress, exPool := defaultAddressAndPool(ExHostAddresses(), _defaultExTCPAddress)
@@ -40,9 +65,24 @@ func defaultOptions() *Options {
 		MacExTCPAddressPool: macExPool,
 		MaxRetryTimes:       _defaultRetryTimes,
 		TimeoutSec:          _defaultTimeoutSec,
+		PoolSize:            _defaultPoolSize,
+		GuardEnabled:        true,
+		GuardFailThreshold:  _defaultGuardFailThreshold,
+		GuardOpenTimeout:    _defaultGuardOpenTimeout,
+		FuturesCalendarPath: defaultFuturesCalendarPath(),
 	}
 }
 
+// defaultFuturesCalendarPath 返回随 `gotdx` 源码发布的默认期货交易日历路径。
+func defaultFuturesCalendarPath() string {
+	_, sourceFile, _, ok := runtime.Caller(0)
+	if !ok {
+		return filepath.Join("data", "futures-trade-calendar.db")
+	}
+	return filepath.Join(filepath.Dir(sourceFile), "data", "futures-trade-calendar.db")
+}
+
+// applyOptions 先填充默认配置，再按传入顺序依次执行 `Option` 覆盖对应字段；后传入的选项优先生效。
 func applyOptions(opts ...Option) *Options {
 	o := defaultOptions()
 	for _, opt := range opts {
@@ -51,56 +91,74 @@ func applyOptions(opts ...Option) *Options {
 	return o
 }
 
+// Option 是用于修改 `Options` 的函数式选项，返回闭包在合并阶段按顺序应用到配置上。
 type Option func(options *Options)
 
+// WithTCPAddress 设置主行情服务器地址，格式为 `host:port`。
 func WithTCPAddress(tcpAddress string) Option {
 	return func(o *Options) {
 		o.TCPAddress = tcpAddress
 	}
 }
 
+// WithTCPAddressPool 设置主行情服务器地址池，连接时按顺序或测速结果依次尝试。
+//
+// 参数 `ips` 为 `host:port` 地址序列，整体替换原地址池；不传参数（空序列）时清空地址池。
 func WithTCPAddressPool(ips ...string) Option {
 	return func(o *Options) {
 		o.TCPAddressPool = ips
 	}
 }
 
+// WithExTCPAddress 设置扩展行情服务器地址，格式为 `host:port`。
 func WithExTCPAddress(tcpAddress string) Option {
 	return func(o *Options) {
 		o.ExTCPAddress = tcpAddress
 	}
 }
 
+// WithExTCPAddressPool 设置扩展行情服务器地址池，连接时按顺序或测速结果依次尝试。
+//
+// 参数 `ips` 为 `host:port` 地址序列，整体替换原地址池；不传参数时清空地址池。
 func WithExTCPAddressPool(ips ...string) Option {
 	return func(o *Options) {
 		o.ExTCPAddressPool = ips
 	}
 }
 
+// WithMacTCPAddress 设置 MAC 主行情服务器地址，格式为 `host:port`。
 func WithMacTCPAddress(tcpAddress string) Option {
 	return func(o *Options) {
 		o.MacTCPAddress = tcpAddress
 	}
 }
 
+// WithMacTCPAddressPool 设置 MAC 主行情服务器地址池，连接时按顺序或测速结果依次尝试。
+//
+// 参数 `ips` 为 `host:port` 地址序列，整体替换原地址池；不传参数时清空地址池。
 func WithMacTCPAddressPool(ips ...string) Option {
 	return func(o *Options) {
 		o.MacTCPAddressPool = ips
 	}
 }
 
+// WithMacExTCPAddress 设置 MAC 扩展行情服务器地址，格式为 `host:port`。
 func WithMacExTCPAddress(tcpAddress string) Option {
 	return func(o *Options) {
 		o.MacExTCPAddress = tcpAddress
 	}
 }
 
+// WithMacExTCPAddressPool 设置 MAC 扩展行情服务器地址池，连接时按顺序或测速结果依次尝试。
+//
+// 参数 `ips` 为 `host:port` 地址序列，整体替换原地址池；不传参数时清空地址池。
 func WithMacExTCPAddressPool(ips ...string) Option {
 	return func(o *Options) {
 		o.MacExTCPAddressPool = ips
 	}
 }
 
+// WithTimeoutSec 设置连接与读写超时时间，单位秒；传入非正数时保持默认超时。
 func WithTimeoutSec(timeoutSec int) Option {
 	return func(o *Options) {
 		if timeoutSec > 0 {
@@ -109,9 +167,75 @@ func WithTimeoutSec(timeoutSec int) Option {
 	}
 }
 
-// WithAutoSelectFastest enables TCP probe sorting before connection attempts.
-func WithAutoSelectFastest(enabled bool) Option {
+// WithFuturesCalendarPath 设置 MAC 期货 K 线自然时间转换使用的 `SQLite` 交易日历路径。
+//
+// 参数 `path` 为日历文件路径；传入空串时关闭期货自然时间转换，保留服务端原始交易时间。
+func WithFuturesCalendarPath(path string) Option {
 	return func(o *Options) {
-		o.AutoSelectFastest = enabled
+		o.FuturesCalendarPath = path
+	}
+}
+
+// WithPoolSize 设置连接池大小，即并行可用的 TCP 连接条数。
+//
+// 参数 `poolSize` 为目标连接条数；传入非正数时保持默认池大小。池内连接各自独立握手，
+// 请求按轮询分散到各连接，连接之间并行、单连接内部串行。
+func WithPoolSize(poolSize int) Option {
+	return func(o *Options) {
+		if poolSize > 0 {
+			o.PoolSize = poolSize
+		}
+	}
+}
+
+// WithSingleConnectionMode 开启显式单连接模式：把连接池大小设为 1，并关闭空数据换节点。
+//
+// 适用于单并发、追求窄尾延迟的调用方：全程复用一条长连接，获得接近老库固定单连接的稳定
+// 延迟分布；断连自愈（心跳判死、后台补建、重平衡）仍然保留。默认关闭，不传该选项时保持
+// 三连接池与空数据并行换节点行为。需要只关闭换节点、保留多连接池时改用
+// `WithEmptyNodeSwitchDisabled(true)`。
+func WithSingleConnectionMode() Option {
+	return func(o *Options) {
+		o.PoolSize = 1
+		o.DisableEmptyNodeSwitch = true
+	}
+}
+
+// WithEmptyNodeSwitchDisabled 设置是否关闭空数据换节点。
+//
+// 参数 `disabled` 为 `true` 时，空数据应答直接返回首次结果，不再并行探测池内其他连接、
+// 不累计节点空数据健康度；为 `false`（默认）时保持原有并行换节点行为。该选项与
+// `WithPoolSize` 相互独立，可单独关闭换节点而不改变池大小；单连接组合使用时优先选择
+// `WithSingleConnectionMode`。
+func WithEmptyNodeSwitchDisabled(disabled bool) Option {
+	return func(o *Options) {
+		o.DisableEmptyNodeSwitch = disabled
+	}
+}
+
+// WithGuardDisabled 设置是否关闭 `execute` 入口的熔断与防击穿保护。
+//
+// 参数 `disabled` 为 `true` 时关闭保护：请求直接走原有执行路径，不统计失败、
+// 不合并并发；为 `false`（默认）时保持熔断+防击穿。适用于需要完全保留原始
+// 行为（如自定义容错策略）的调用方。
+func WithGuardDisabled(disabled bool) Option {
+	return func(o *Options) {
+		o.GuardEnabled = !disabled
+	}
+}
+
+// WithGuardConfig 设置熔断阈值与冷却时长。
+//
+// 参数 `failThreshold` 为同一命令码连续失败多少次打开熔断，非正数保持默认 5；
+// 参数 `openTimeout` 为熔断打开后冷却多久放行单个试探请求，非正数保持默认 5 秒。
+// 熔断按协议命令码分桶，互不影响。
+func WithGuardConfig(failThreshold int, openTimeout time.Duration) Option {
+	return func(o *Options) {
+		if failThreshold > 0 {
+			o.GuardFailThreshold = failThreshold
+		}
+		if openTimeout > 0 {
+			o.GuardOpenTimeout = openTimeout
+		}
 	}
 }

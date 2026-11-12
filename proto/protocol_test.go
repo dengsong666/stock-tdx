@@ -4,10 +4,46 @@ import (
 	"bytes"
 	"encoding/binary"
 	"math"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/bensema/gotdx/types"
 )
 
+func TestSeqIDConcurrent(t *testing.T) {
+	const (
+		workers   = 16
+		perWorker = 128
+	)
+
+	ids := make(chan uint32, workers*perWorker)
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Go(func() {
+			for range perWorker {
+				ids <- seqID()
+			}
+		})
+	}
+	wg.Wait()
+	close(ids)
+
+	seen := make(map[uint32]struct{}, workers*perWorker)
+	for id := range ids {
+		if _, exists := seen[id]; exists {
+			t.Fatalf("duplicate sequence ID: %d", id)
+		}
+		seen[id] = struct{}{}
+	}
+	if len(seen) != workers*perWorker {
+		t.Fatalf("unexpected sequence ID count: %d", len(seen))
+	}
+}
+
+// encodePrice 将整数价格按通达信变长编码规则编码为变长字节。
+// 参数 `value` 为待编码的整数价格，允许负数；负号由首字节 `0x40` 标志位承载，
+// 后续字节最高位为 1 表示仍有续字节；返回编码后的字节切片，不产生错误。
 func encodePrice(value int) []byte {
 	sign := value < 0
 	if sign {
@@ -36,6 +72,9 @@ func encodePrice(value int) []byte {
 	return out
 }
 
+// encodeVolumeProfilePriceDelta 将资金分布价格差按无符号变长规则编码为字节。
+// 参数 `value` 为待编码的 `int32` 差值；该编码不携带独立负号标志位，
+// 负数先按位模式转无符号再编码；返回编码后的字节切片，不产生错误。
 func encodeVolumeProfilePriceDelta(value int32) []byte {
 	u := uint32(value)
 	first := byte(u & 0x3f)
@@ -57,6 +96,9 @@ func encodeVolumeProfilePriceDelta(value int32) []byte {
 	return out
 }
 
+// mustBuildRequest 调用消息的 `BuildRequest` 生成请求报文。
+// 参数 `msg` 为待构造的协议消息；返回生成的原始报文字节切片；
+// 构造失败时通过 `t` 调用 `Fatalf` 终止测试。
 func mustBuildRequest(t *testing.T, msg RequestBuilder) []byte {
 	t.Helper()
 	raw, err := msg.BuildRequest()
@@ -66,6 +108,9 @@ func mustBuildRequest(t *testing.T, msg RequestBuilder) []byte {
 	return raw
 }
 
+// readReqHeader 解析标准协议请求报文头部。
+// 参数 `raw` 为完整请求报文，仅取前 12 字节解码为 `ReqHeader`；
+// 返回解码后的头部；字节不足或解码失败时通过 `t` 调用 `Fatalf` 终止测试。
 func readReqHeader(t *testing.T, raw []byte) ReqHeader {
 	t.Helper()
 	var header ReqHeader
@@ -75,7 +120,7 @@ func readReqHeader(t *testing.T, raw []byte) ReqHeader {
 	return header
 }
 
-// TestBaseUnit 验证 ETF 使用千分位，其他证券保持默认百分位。
+// TestBaseUnit 验证 `ETF` 使用千分位，其他证券保持默认百分位。
 func TestBaseUnit(t *testing.T) {
 	tests := map[string]float64{
 		"510300": 1000,
@@ -296,7 +341,7 @@ func TestGetHistoryMinuteTimeDataBuildRequestAndParseResponse(t *testing.T) {
 	}
 }
 
-// 验证空或超短报文返回 error 而非 panic（修复前 data[:2] 会越界）。
+// 验证空报文或超短报文返回错误而非触发 `panic`（修复前 `data[:2]` 会越界）。
 func TestGetHistoryMinuteTimeDataParseResponseShortData(t *testing.T) {
 	msg := NewGetHistoryMinuteTimeData(&GetHistoryMinuteTimeDataRequest{
 		Date:   20260811,
@@ -304,17 +349,17 @@ func TestGetHistoryMinuteTimeDataParseResponseShortData(t *testing.T) {
 		Code:   [6]byte{'0', '0', '0', '7', '7', '9'},
 	})
 
-	// 空报文：修复前触发 slice bounds out of range panic。
+	// 空报文：修复前会触发切片下标越界并崩溃。
 	if err := msg.ParseResponse(&RespHeader{}, []byte{}); err == nil {
 		t.Fatal("expected error for empty payload")
 	}
-	// 少于 10 字节的头部报文同样应返回 error。
+	// 少于 10 字节的头部报文同样应返回错误。
 	if err := msg.ParseResponse(&RespHeader{}, make([]byte, 4)); err == nil {
 		t.Fatal("expected error for short payload")
 	}
 }
 
-// 验证 Count 声称条数超过实际报文时返回 error 而非 panic。
+// 验证 `Count` 声称的条数超过实际报文长度时，返回错误而非触发 `panic`。
 func TestGetHistoryMinuteTimeDataParseResponseTruncatedData(t *testing.T) {
 	msg := NewGetHistoryMinuteTimeData(&GetHistoryMinuteTimeDataRequest{
 		Date:   20260811,
@@ -340,8 +385,8 @@ func TestGetHistoryMinuteTimeDataParseResponseTruncatedData(t *testing.T) {
 	}
 }
 
-// 验证变长价格字段在续字节处截断时返回 error 而非 panic。
-// 修复前 readPriceField 仅检查起始位置，getprice 会在读取续字节时越界。
+// 验证变长价格字段在续字节处截断时，返回错误而非触发 `panic`。
+// 修复前 `readPriceField` 仅检查起始位置，读取续字节时会越界。
 func TestGetHistoryMinuteTimeDataParseResponseTruncatedVarint(t *testing.T) {
 	msg := NewGetHistoryMinuteTimeData(&GetHistoryMinuteTimeDataRequest{
 		Date:   20260811,
@@ -359,7 +404,7 @@ func TestGetHistoryMinuteTimeDataParseResponseTruncatedVarint(t *testing.T) {
 	if err := binary.Write(buf, binary.LittleEndian, uint32(0)); err != nil {
 		t.Fatal(err)
 	}
-	// 变长字段以续位 0x80 开头但无后续字节，直接越界。
+	// 变长字段以续位 `0x80` 开头但无后续字节，直接越界。
 	buf.Write([]byte{0x80})
 
 	if err := msg.ParseResponse(&RespHeader{}, buf.Bytes()); err == nil {
@@ -371,7 +416,7 @@ func TestGetSecurityBarsBuildRequestAndParseResponse(t *testing.T) {
 	msg := NewGetSecurityBars(&GetSecurityBarsRequest{
 		Market:   1,
 		Code:     [6]byte{'6', '0', '0', '0', '0', '0'},
-		Category: KLINE_TYPE_DAILY,
+		Category: types.KLINE_TYPE_DAILY,
 		Times:    2,
 		Start:    3,
 		Count:    4,
@@ -441,6 +486,32 @@ func TestGetSecurityBarsBuildRequestAndParseResponse(t *testing.T) {
 	}
 	if bar.UpCount != 7 || bar.DownCount != 9 {
 		t.Fatalf("unexpected counts: %+v", bar)
+	}
+}
+
+// TestGetSecurityBarsEmptyReplyNoUnderflow 覆盖空应答回归：服务器对无数据周期
+// 返回 `Count=0`，解析时"多要一条昨收基准"的减一不得下溢成 65535（否则
+// `isEmptyReply` 判空失效、空数据换节点不触发）。修复前该场景得到
+// `Count=65535` 且 `List` 长度与 65535 不符。
+func TestGetSecurityBarsEmptyReplyNoUnderflow(t *testing.T) {
+	msg := NewGetSecurityBars(&GetSecurityBarsRequest{
+		Market:   1,
+		Code:     [6]byte{'6', '0', '0', '0', '0', '0'},
+		Category: types.KLINE_TYPE_DAILY,
+		Times:    2,
+		Start:    3,
+		Count:    4,
+		Adjust:   1,
+	})
+	if err := msg.ParseResponse(&RespHeader{}, []byte{0, 0}); err != nil {
+		t.Fatalf("parse empty response failed: %v", err)
+	}
+	reply := msg.Response()
+	if reply.Count != 0 {
+		t.Fatalf("empty reply underflow: count=%d, want 0", reply.Count)
+	}
+	if len(reply.List) != 0 {
+		t.Fatalf("empty reply should have no bars, got %d", len(reply.List))
 	}
 }
 
@@ -1294,6 +1365,8 @@ func TestGetCompanyCategoryTrimsFixedStringGarbage(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// 每条记录固定 152 字节：前 64 字节分类名称、后 80 字节文件名；
+	// 两段均在 NUL 之后写入垃圾字节，验证定长解码器按 NUL 截断并去除尾部填充。
 	name := make([]byte, 64)
 	copy(name, []byte{0xd7, 0xca, 0xbd, 0xf0, 0xb6, 0xaf, 0xcf, 0xf2})
 	name[8] = 0x00
@@ -1547,8 +1620,8 @@ func TestDownloadFileBuildRequestAndParseResponse(t *testing.T) {
 
 func TestBaseUnitUsesHundredForShenZhenIndexPrefix(t *testing.T) {
 	cases := []struct {
-		code string
-		want float64
+		code string  // 证券代码
+		want float64 // 报价基准单位：100 为百分位（两位小数），1000 为千分位（三位小数）
 	}{
 		{code: "000001", want: 100},
 		{code: "600000", want: 100},

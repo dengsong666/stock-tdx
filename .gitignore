@@ -1,2 +1,5 @@
 .idea
 *.vscode
+
+# 本地/CI 编译产物，不入库（二进制发 Release）
+*.exe

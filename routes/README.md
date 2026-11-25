@@ -8,7 +8,8 @@ routes/
 ├── unusual/  # 批量个股异动 SSE
 ├── quotes/   # TDX 批量股票行情
 ├── kline/    # 单股票时间区间 K 线
-└── auction/  # 批量股票多日竞价金额
+├── auction/  # 批量股票多日竞价金额
+└── opening/  # 批量股票某日开盘成交（09:25 竞价成交与 09:30 后第一笔）
 ```
 
 当前地址：
@@ -21,8 +22,58 @@ routes/
 - `/api/stock/quotes`：TDX 批量股票行情
 - `/api/stock/kline`：单股票时间区间 K 线
 - `/api/stock/auction-amounts`：批量股票多日竞价金额
+- `/api/stock/opening-trades`：批量股票某日开盘成交
 
 以上地址（`/api/health` 除外）都需要带共享 JWT，浏览器侧推荐经主站 `/api/proxy/tdx/**` 访问，详见“CORS 与鉴权”。
+
+## 批量股票某日开盘成交
+
+```http
+POST /api/stock/opening-trades
+Content-Type: application/json
+
+{"date":"20210512","codes":["001202","600519"]}
+```
+
+`date` 为 `YYYYMMDD` 交易日；单次最多 20 只沪深北 A 股，重复代码按首次出现顺序去重。
+
+成功响应：
+
+```json
+{
+  "code": 0,
+  "msg": "success",
+  "data": {
+    "trades": {
+      "001202": {
+        "auction_time": "09:25:03",
+        "auction_price": 25.93,
+        "first_time": "09:30:00",
+        "first_price": 26.02,
+        "first_vol": 674
+      },
+      "600519": {
+        "auction_time": "09:25:04",
+        "auction_price": 1949.08,
+        "first_time": "09:30:00",
+        "first_price": 1952.59,
+        "first_vol": 9
+      }
+    },
+    "missing_codes": []
+  }
+}
+```
+
+（上面是 2026-11-25 实测返回。）
+
+读 MAC 历史分笔（约 3 秒一条快照、带秒，回溯至少到 2020-07）：`auction_*` 是当天 09:25 那条集合竞价成交，没有时为 `null`；
+`first_*` 是 09:30:00 及以后第一条快照（快照内最后成交价），价格单位元、按分四舍五入，`first_vol` 单位手；价格为 0 的占位记录跳过。
+当天没有 09:30 之后成交的代码（停牌、日期未开盘或非交易日）列入 `missing_codes`。
+
+MAC 分笔从收盘往前分页，历史日要翻完整天（约 5 页）才拿得到开盘那头；盘中 09:31 前后查当天只有一页。
+每次 HTTP 请求复用一条 MAC 短连接；某只股票查询失败时断开并换下一个主站**新建**连接重试（gotdx 的 `Disconnect` 会把客户端永久标记为关闭，
+不能复用），全部主站都失败才整批返回 502。供 adata 采集 `bid_strong.open_first_price`（模型的第一笔价买入口径）。
 
 ## 批量股票多日竞价金额
 

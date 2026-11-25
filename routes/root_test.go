@@ -9,6 +9,7 @@ import (
 	"github.com/bensema/gotdx/proto"
 	"github.com/bensema/gotdx/routes/auction"
 	"github.com/bensema/gotdx/routes/kline"
+	"github.com/bensema/gotdx/routes/opening"
 )
 
 type rootMonitorClient struct{}
@@ -71,6 +72,13 @@ func TestRootHandlerRoutes(t *testing.T) {
 	handler.ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("auction route must be registered: code=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+
+	request = httptest.NewRequest(http.MethodGet, opening.Path, nil)
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("opening route must be registered: code=%d body=%s", recorder.Code, recorder.Body.String())
 	}
 }
 

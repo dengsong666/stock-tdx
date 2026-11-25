@@ -14,6 +14,7 @@ import (
 	"github.com/bensema/gotdx/routes/auction"
 	"github.com/bensema/gotdx/routes/boards"
 	"github.com/bensema/gotdx/routes/kline"
+	"github.com/bensema/gotdx/routes/opening"
 	"github.com/bensema/gotdx/routes/quotes"
 	"github.com/bensema/gotdx/routes/unusual"
 )
@@ -35,6 +36,7 @@ func NewRootHandler(webHandler http.Handler, client unusual.MACMarketMonitorClie
 	quotes.Register(mux, quotes.NewService())
 	kline.Register(mux, kline.NewService())
 	auction.Register(mux, auction.NewService())
+	opening.Register(mux, opening.NewService())
 	boards.Register(mux, boards.NewService())
 	mux.HandleFunc(HealthPath, handleHealth)
 	mux.HandleFunc(WebPath, func(w http.ResponseWriter, r *http.Request) {

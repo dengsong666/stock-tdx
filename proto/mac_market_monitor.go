@@ -47,6 +47,8 @@ type MACMarketMonitorItem struct {
 	Time        string  // 异动时间标签，格式 HH:MM:SS。
 	Desc        string  // 由异动类型解码得到的描述文案。
 	Value       string  // 由异动类型解码得到的数值文本。
+	Amount      float64 // 金额（元）；HasAmount 为 false 时无意义。
+	HasAmount   bool    // 该类型是否带金额（尾盘组与纯百分比类不带）。
 	UnusualType uint8   // 异动类型字节，决定负载区的解释方式。
 	V1          uint8   // 附属标识字节，含义随异动类型变化，语义待确认。
 	V2          float64 // 附属单精度浮点数值一，含义随异动类型变化，语义待确认。
@@ -139,7 +141,7 @@ func (obj *MACMarketMonitor) ParseResponse(header *RespHeader, data []byte) erro
 		v3 := float64(math.Float32frombits(binary.LittleEndian.Uint32(payload[5:9])))
 		v4 := float64(math.Float32frombits(binary.LittleEndian.Uint32(payload[9:13])))
 		// 异动类型字节决定负载区应解释为何种描述文案与数值。
-		desc, value := unpackUnusualByType(data[base+9], payload)
+		decoded := unpackUnusualByType(data[base+9], payload)
 
 		// 记录头部：市场（0:2）、GBK 代码（2:8）、序号（11:13）、类型字节（9）；
 		// 时间（29）为小时，（30:32）为两字节整数，拆出分钟与秒。
@@ -148,8 +150,10 @@ func (obj *MACMarketMonitor) ParseResponse(header *RespHeader, data []byte) erro
 			Market:      binary.LittleEndian.Uint16(data[base : base+2]),
 			Code:        Utf8ToGbk(data[base+2 : base+8]),
 			Time:        fmt.Sprintf("%02d:%02d:%02d", int(data[base+29]), int(binary.LittleEndian.Uint16(data[base+30:base+32]))/100, int(binary.LittleEndian.Uint16(data[base+30:base+32]))%100),
-			Desc:        desc,
-			Value:       value,
+			Desc:        decoded.Desc,
+			Value:       decoded.Value,
+			Amount:      decoded.Amount,
+			HasAmount:   decoded.HasAmount,
 			UnusualType: data[base+9],
 			V1:          v1,
 			V2:          v2,

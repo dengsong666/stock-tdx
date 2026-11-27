@@ -157,15 +157,18 @@ type unusualRawPayload struct {
 }
 
 type unusualEventPayload struct {
-	Seq   uint64            `json:"seq"`
-	Date  string            `json:"date"`
-	Code  string            `json:"code"`
-	Name  string            `json:"name"`
-	Time  string            `json:"time"`
-	Desc  string            `json:"desc"`
-	Value string            `json:"value"`
-	Type  uint8             `json:"type"`
-	Raw   unusualRawPayload `json:"raw"`
+	Seq   uint64 `json:"seq"`
+	Date  string `json:"date"`
+	Code  string `json:"code"`
+	Name  string `json:"name"`
+	Time  string `json:"time"`
+	Desc  string `json:"desc"`
+	Value string `json:"value"`
+	// Amount 金额（元）：只有主力买卖、大单托盘/压盘、竞价试买、涨跌停组才有；
+	// 尾盘组与纯百分比类不带，字段省略。客户端按「万 / 亿」展示与播报。
+	Amount *float64          `json:"amount,omitempty"`
+	Type   uint8             `json:"type"`
+	Raw    unusualRawPayload `json:"raw"`
 }
 
 type sseMessage struct {
@@ -814,7 +817,7 @@ func makeUnusualEventKey(market uint8, item proto.MACMarketMonitorItem) unusualE
 
 func makeUnusualEventPayload(event unusualStoredEvent) unusualEventPayload {
 	item := event.Item
-	return unusualEventPayload{
+	payload := unusualEventPayload{
 		Seq:   event.Seq,
 		Date:  event.Date,
 		Code:  item.Code,
@@ -830,6 +833,11 @@ func makeUnusualEventPayload(event unusualStoredEvent) unusualEventPayload {
 			V4: finiteJSONFloat(item.V4),
 		},
 	}
+	if item.HasAmount {
+		amount := finiteJSONFloat(item.Amount)
+		payload.Amount = &amount
+	}
+	return payload
 }
 
 func finiteJSONFloat(value float64) float64 {
